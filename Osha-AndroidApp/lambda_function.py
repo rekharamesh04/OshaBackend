@@ -41,11 +41,9 @@ DOWNLOAD_URL_EXPIRY = int(os.getenv("DOWNLOAD_URL_EXPIRY", "3600"))
 
 
 MAX_IMAGE_WIDTH = 800
-MAX_IMAGE_QUALITY = 85  # higher quality for component items
-YOLO_IMAGE_SIZE = 800  # match your training imgsz exactly
+MAX_IMAGE_QUALITY = 85
+YOLO_IMAGE_SIZE = 800
 
-# Single source of truth for blocking low-confidence detections on items 1-6.
-# Kept low so Claude's valid pass decisions are not overridden by a tight confidence gate.
 IMAGE_CONFIDENCE_BLOCK_THRESHOLD = 0.35
 
 ALLOWED_CONTENT_TYPES = {
@@ -68,9 +66,6 @@ lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 inspection_table = dynamodb.Table(INSPECTION_TABLE_NAME)
 session_table = dynamodb.Table(SESSION_TABLE_NAME)
 
-# Module-level thread pool — reused across warm Lambda invocations.
-# max_workers=4 is safe for Lambda (128–512 MB RAM). Each thread only
-# blocks on I/O (PIL resize, network), so GIL contention is minimal.
 _THREAD_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 # ------------------------------------------------------------------------------
@@ -178,7 +173,6 @@ FIRE_EXTINGUISHER_CHECKLIST = {
 # Explicit visual rules per checklist item
 # ------------------------------------------------------------------------------
 CHECKLIST_VISUAL_RULES = {
-    "1": "Check if a fire extinguisher is present at the designated location. If the location is empty or the bracket is empty, it is a fail.",
     "1": (
         "RULE — PRESENCE WITHIN 50 FEET OF RISK AREA:\n"
         "PASS only if ALL of the following are true:\n"
@@ -252,36 +246,19 @@ CHECKLIST_VISUAL_RULES = {
         "    From a distance it appears as: a small colored string, tag, or plastic loop near the handle top.\n"
         "    You do NOT need to read it — if ANY colored tag/string/loop is visible near handle = seal present.\n\n"
         "DISTANCE-AWARE EVALUATION LOGIC:\n"
-        "  The evaluation changes based on how close the shot is:\n\n"
         "  WIDE/FAR SHOT (full extinguisher visible, handle area is small in frame):\n"
         "    PASS if: A ring/loop shape OR colored tag/string is visible near the handle top area.\n"
-        "    PASS if: The handle area exists and appears to have something through/on it,\n"
-        "             even if you cannot confirm exact type at this distance.\n"
+        "    PASS if: The handle area exists and appears to have something through/on it.\n"
         "    FAIL if: The handle area is CLEARLY and COMPLETELY bare — a handle lever with\n"
         "             absolutely nothing through it, no ring, no string, no tag, nothing.\n"
-        "    INCONCLUSIVE → PASS (not fail): If handle area is too small to assess at all,\n"
-        "             treat as PASS and note that close-up verification is recommended.\n"
-        "             Do NOT fail just because you cannot confirm from this distance.\n\n"
+        "    INCONCLUSIVE → PASS: If handle area is too small to assess at all.\n\n"
         "  CLOSE/MEDIUM SHOT (handle area takes up reasonable portion of frame):\n"
         "    PASS if: Pin ring/loop is clearly visible through the handle trigger mechanism.\n"
         "    PASS if: Tamper seal (plastic tag, string, zip-tie) is present near pin/handle.\n"
         "    FAIL if: Handle trigger is clearly visible and the hole through it is empty — no pin.\n"
         "    FAIL if: Pin is present but tamper seal is clearly torn off or absent.\n\n"
-        "PASS CONDITIONS (any of these = PASS):\n"
-        "  1. A metal ring, loop, or bar shape is visible through the handle area.\n"
-        "  2. A colored string, tag, or plastic element is visible hanging near the handle/pin.\n"
-        "  3. Handle area is too small in frame to assess — benefit of doubt = PASS with note.\n"
-        "  4. Any element that could be a pin or seal is visible near the handle top.\n\n"
-        "FAIL CONDITIONS (ALL must be true to fail):\n"
-        "  1. The extinguisher handle and trigger area is CLEARLY visible in the image, AND\n"
-        "  2. The handle hole/trigger mechanism appears COMPLETELY EMPTY — no ring, no loop, AND\n"
-        "  3. No colored tag, string, or plastic element is visible anywhere near the handle, AND\n"
-        "  4. You are confident this is not just a distance/clarity issue.\n\n"
         "CRITICAL RULE:\n"
         "  From a wide shot — when in doubt, PASS and recommend close-up if needed.\n"
-        "  The reason: a missing pin is rare and obvious even from distance (bare handle).\n"
-        "  A present pin/seal may be hard to confirm from distance but is still there.\n"
-        "  Do NOT fail item 5 from a wide shot just because you cannot confirm detail.\n"
         "  Only fail if the handle is clearly bare and clearly missing both pin and seal."
     ),
     "6": (
@@ -298,68 +275,147 @@ CHECKLIST_VISUAL_RULES = {
         "  - Hose visibly cracked, detached, or missing.\n"
         "If image is too far away or blurry to assess condition, set pass=false and request a close-up retake."
     ),
-    "7": (
-        "RULE — NOZZLE/HOSE FREE OF BLOCKAGE AND PHYSICALLY ATTACHED TO A FIRE EXTINGUISHER:\n\n"
-        "CRITICAL PREREQUISITE — EXTINGUISHER MUST BE PRESENT AND HOSE MUST BE ATTACHED:\n"
-        "  This check is ONLY valid when the hose/nozzle is visibly connected to a fire extinguisher body.\n"
-        "  A fire extinguisher body is: a red (or silver/yellow) cylindrical pressure vessel with a gauge and handle.\n"
-        "  FAIL immediately if:\n"
-        "    - No fire extinguisher body is visible in the image at all.\n"
-        "    - The hose or nozzle is detached, removed, or held separately from the extinguisher.\n"
-        "    - Only a standalone hose or nozzle is shown without an extinguisher body it connects to.\n"
-        "    - The extinguisher body is present but the hose is clearly disconnected from it.\n\n"
-        "WHAT YOU ARE CHECKING (ONLY after above prerequisite is confirmed):\n"
-        "  Whether the OUTSIDE of the nozzle tip is free of any external covering or blockage,\n"
-        "  and whether the hose and nozzle are physically undamaged and still attached to the extinguisher.\n"
-        "  You are NOT required to see INTO the nozzle bore — this is physically impossible\n"
-        "  from most photo angles and is NOT part of this check.\n\n"
-        "ACCEPTED PHOTO ANGLES:\n"
-        "  Front-facing, side-angle, top-down — all are valid.\n"
-        "  The extinguisher body does NOT need to fill the entire frame,\n"
-        "  but it MUST be visibly present and the hose MUST be connected to it.\n\n"
-        "PASS only if ALL of the following are true:\n"
-        "  1. A fire extinguisher body is clearly visible in the image.\n"
-        "  2. The hose is visibly connected/attached to the extinguisher body (not detached or held separately).\n"
-        "  3. The nozzle tip or hose end is visible from any angle.\n"
-        "  4. No material is visibly COVERING the OUTSIDE of the nozzle tip:\n"
-        "     (no tape wrapped around it, no plastic cap, no cloth tied over it, no packed debris at the tip).\n"
-        "  5. The hose is not kinked, crushed, or tied shut.\n"
-        "  6. The nozzle/horn is physically intact — not cracked, melted, or broken off.\n\n"
-        "FAIL if:\n"
-        "  - No fire extinguisher body is visible.\n"
-        "  - The hose is detached from the extinguisher or only shown in isolation.\n"
-        "  - The nozzle tip or hose end is NOT visible anywhere in the image — \n"
-        "    even if the extinguisher body is present and looks fine.\n"
-        "  - Only the top handle/pin area of an extinguisher is visible with NO hose visible at all.\n"
-        "  - Tape, a cap, cloth, or any material is visibly COVERING the outside of the nozzle tip.\n"
-        "  - The hose is kinked, crushed, or tied so it cannot discharge.\n"
-        "  - The nozzle tip is cracked, melted, or broken.\n\n"
-        "CRITICAL ANTI-HALLUCINATION RULE:\n"
-        "  If you cannot SEE the actual nozzle tip or hose end in the image, you CANNOT confirm\n"
-        "  it is 'unobstructed' or 'securely attached'. Do NOT assume compliance.\n"
-        "  A beautiful extinguisher body with NO visible hose/nozzle = FAIL.\n"
-        "  You must literally see the nozzle or hose end to pass this item.\n\n"
-        "DO NOT FAIL because:\n"
-        "  - You cannot see INTO the nozzle opening (not required).\n"
-        "  - The photo is taken from the side or an angle (any angle is fine as long as extinguisher is present).\n"
-        "  - There is shadow inside the nozzle opening (shadow ≠ blockage)."
-    ),
-   "8": (
-        "ITEM 8 — PRESSURE GAUGE / NEEDLE IN GREEN ZONE:\n\n"
-        "PASS only if ALL are true:\n"
-        "1. A pressure gauge is clearly visible.\n"
-        "2. The TRUE center-attached moving needle is clearly pointing inside the GREEN zone.\n"
-        "3. The needle is NOT in the left red recharge zone.\n"
-        "4. The needle is NOT in the right red overcharge zone.\n\n"
-        "FAIL if ANY are true:\n"
-        "- The true needle is in a red zone.\n"
-        "- The needle position cannot be confidently verified.\n"
-        "- The gauge is broken, cracked, or missing.\n"
-        "- You are mistaking the printed white '195' line or outer white scale lines for the actual moving needle.\n\n"
-        "Important:\n"
-        "- A red-dominant gauge face is normal and is NOT a fail by itself.\n"
-        "- A white, yellow, or black needle can still be PASS if it points in the green zone.\n"
-        "- ANTI-HALLUCINATION: The printed white '195' mark and outer printed scale lines are NOT the needle. Do not follow them. If you mistake a printed white scale line for the needle, you will hallucinate a PASS for an overcharged gauge."
+
+ 
+"7": (
+    "RULE — NOZZLE FREE OF BLOCKAGE:\n\n"
+    "PHOTO GUIDANCE FOR USERS:\n"
+    "For best results, the nozzle TIP should be pointed TOWARD the camera so the opening\n"
+    "(the hole at the end) is visible. However, side-view nozzles are also acceptable if\n"
+    "the end of the nozzle can be seen.\n\n"
+    "STEP 1 — Locate the nozzle in the image.\n"
+    "The nozzle is the cylindrical or conical part at the end of the hose.\n"
+    "It may be:\n"
+    "  - Held in a person's hand\n"
+    "  - Hanging freely\n"
+    "  - Resting somewhere\n"
+    "Look for a small black plastic, brass, or metal cylinder/cone attached to the hose end.\n\n"
+    "STEP 2 — Determine what verdict applies:\n\n"
+    "PASS if ALL of the following are true:\n"
+    "  ✓ A fire extinguisher is visible in the image.\n"
+    "  ✓ A hose is connected to the extinguisher.\n"
+    "  ✓ The nozzle is visible at the end of the hose (any angle is acceptable).\n"
+    "  ✓ The nozzle appears to be its natural material color (black plastic, brass, metal).\n"
+    "  ✓ NO bright foreign color (yellow, red, orange, blue, green) is attached to the tip.\n"
+    "  ✓ NO tape, wrapping, or debris is visible on the nozzle.\n"
+    "  ✓ The nozzle is physically intact (no cracks, breaks, melting).\n"
+    "  ✓ The hose is not visibly kinked or crushed.\n\n"
+    "FAIL if ANY of the following:\n"
+    "  ✗ No fire extinguisher visible.\n"
+    "  ✗ Hose is detached from the extinguisher.\n"
+    "  ✗ A BRIGHT YELLOW, RED, ORANGE, BLUE, or other contrasting colored cap/plug is\n"
+    "    attached to the nozzle.\n"
+    "  ✗ Tape, plastic wrap, paper, or visible debris is on the nozzle.\n"
+    "  ✗ Nozzle is visibly cracked, broken, or melted.\n"
+    "  ✗ Hose is visibly kinked, crushed, or tied.\n\n"
+    "NEED REVIEW only if:\n"
+    "  ⚠ The nozzle is COMPLETELY not visible anywhere in the image (no hose end shown,\n"
+    "    or the entire nozzle is hidden behind something).\n"
+    "  ⚠ The image is too blurry to identify any part of the nozzle.\n\n"
+    "CRITICAL INSTRUCTIONS:\n\n"
+    "1. SIDE VIEW IS ACCEPTABLE:\n"
+    "   If you see the SIDE of the nozzle (a cylindrical shape) without seeing directly\n"
+    "   into the opening, this is STILL a valid inspection. You can determine obstruction\n"
+    "   by checking if any FOREIGN COLORED OBJECT is attached to the nozzle.\n"
+    "   - No foreign objects visible on the side = no obstruction = PASS\n"
+    "   - Foreign object (yellow cap, tape, etc.) visible = obstruction = FAIL\n\n"
+    "2. SMALL NOZZLE IN FRAME IS ACCEPTABLE:\n"
+    "   The nozzle does NOT need to fill the frame. If you can identify a nozzle at the\n"
+    "   end of the hose, even if it's small, you can make a verdict.\n\n"
+    "3. THE 'COLOR TEST' IS YOUR PRIMARY TOOL:\n"
+    "   Look at the nozzle overall. What color is it?\n"
+    "   - All black/metal/brass with no foreign attachments → PASS\n"
+    "   - Has a bright yellow/red/orange/blue/green attachment → FAIL\n"
+    "   - Has tape/wrapping → FAIL\n"
+    "   - Cannot find the nozzle at all in the image → NEED REVIEW\n\n"
+    "4. DO NOT REQUEST RETAKE FOR ANGLE ISSUES:\n"
+    "   Side view, angled view, or partial view of the nozzle are all acceptable.\n"
+    "   Only request retake (NEED REVIEW) if the nozzle is COMPLETELY hidden from view.\n\n"
+    "5. NEVER CONFABULATE:\n"
+    "   If you see a yellow cap, say 'yellow cap', not 'clear opening'.\n"
+    "   If you see a black nozzle, say 'black nozzle', not 'unclear'.\n"
+    "   Describe what you actually see.\n\n"
+    "EXAMPLES:\n\n"
+    "  Example 1: Black plastic nozzle held sideways in hand, no foreign colors visible.\n"
+    "    Reasoning: Nozzle is visible, all black plastic, no foreign attachments.\n"
+    "    Verdict: PASS\n\n"
+    "  Example 2: Nozzle with a bright yellow cap clearly attached to the tip.\n"
+    "    Reasoning: Yellow object is a foreign cap, not part of the nozzle.\n"
+    "    Verdict: FAIL — Remove yellow cap.\n\n"
+    "  Example 3: Nozzle is in frame but white tape is wrapped around it.\n"
+    "    Reasoning: White tape is foreign material covering the nozzle.\n"
+    "    Verdict: FAIL — Remove tape.\n\n"
+    "  Example 4: No nozzle visible anywhere — only extinguisher body shown, no hose end.\n"
+    "    Reasoning: Cannot locate the nozzle in the image.\n"
+    "    Verdict: NEED REVIEW — Retake to include nozzle.\n\n"
+    "DEFAULT BEHAVIOR:\n"
+    "  - If a nozzle is visible and looks all-natural-material with no foreign attachments\n"
+    "    → PASS (regardless of viewing angle).\n"
+    "  - If a foreign colored object is clearly attached → FAIL.\n"
+    "  - Only NEED REVIEW if the nozzle truly cannot be located in the image."
+),
+
+ 
+ 
+ "8": (
+    "RULE — PRESSURE GAUGE ADEQUATELY CHARGED:\n"
+    "PASS only if ALL of the following are true:\n"
+    "  1. A pressure gauge or pressure indicator is visible anywhere in the image.\n"
+    "     It does NOT need to fill the frame — a small gauge on a full extinguisher shot is fine.\n"
+    "  2. The gauge glass/face is intact and readable.\n"
+    "  3. The gauge needle tip is WITHIN the GREEN zone (which is a RANGE/ARC, not a single point).\n"
+    "\n"
+    "CRITICAL — GREEN ZONE IS A RANGE, NOT A POINT:\n"
+    "  The green zone spans an arc on the gauge face. The needle PASSES as long as its TIP\n"
+    "  is anywhere ON or INSIDE the green colored area. The needle does NOT need to point\n"
+    "  to exact dead-center / 12 o'clock to pass.\n"
+    "\n"
+    "  ✓ PASS — needle tip ON green at any position within the green arc:\n"
+    "    - Tip on LEFT edge of green band → PASS\n"
+    "    - Tip in CENTER of green band → PASS\n"
+    "    - Tip on RIGHT edge of green band → PASS\n"
+    "    - Needle tilted, but tip clearly on green background → PASS\n"
+    "    - For dial gauges: needle anywhere between RECHARGE (red left) and OVERCHARGED (red right)\n"
+    "      with tip on green background → PASS\n"
+    "\n"
+    "  ✗ FAIL — only when needle tip is OUTSIDE the green area:\n"
+    "    - Tip on red RECHARGE side (low pressure) → FAIL\n"
+    "    - Tip on red OVERCHARGED side (high pressure) → FAIL\n"
+    "    - Tip past max scale value (even in white/blank area) → FAIL (overcharged)\n"
+    "    - Tip in yellow/caution band past green boundary → FAIL\n"
+    "\n"
+    "GAUGE TYPE GUIDANCE:\n"
+    "  - Dial gauges: needle tip on green band between RECHARGE and OVERCHARGED zones → PASS\n"
+    "  - Window indicators: green window illuminated → PASS\n"
+    "  - Popup pins: pin is flush with the body → PASS\n"
+    "\n"
+    "FAIL conditions:\n"
+    "  - The gauge is missing, broken, or completely unreadable.\n"
+    "  - The needle tip is in the red RECHARGE zone (too low pressure).\n"
+    "  - The needle tip is in the red OVERCHARGED zone (too high pressure).\n"
+    "  - The needle tip is past the maximum normal scale value.\n"
+    "  - The needle zone CANNOT be determined AT ALL after considering position, color, and labels.\n"
+    "\n"
+    "EVIDENCE PRIORITY (use ALL three, in this order):\n"
+    "  1. BACKGROUND COLOR AT NEEDLE TIP (most reliable for green):\n"
+    "     Tip sits on green background → PASS regardless of exact angle.\n"
+    "     Tip sits on red background → FAIL (use position to determine recharge vs overcharge).\n"
+    "  2. POSITION RELATIVE TO ZONE BOUNDARIES:\n"
+    "     Tip between RECHARGE and OVERCHARGED labels → green zone → PASS.\n"
+    "     Tip past either boundary → FAIL.\n"
+    "  3. NEAREST TEXT LABEL TO TIP:\n"
+    "     RECHARGE nearest tip → FAIL (recharge needed).\n"
+    "     OVERCHARGED nearest tip → FAIL (overcharged).\n"
+    "     No red label near tip / tip between labels → PASS.\n"
+    "\n"
+    "CRITICAL REMINDERS:\n"
+    "  ⚠ Judge zone by NEEDLE TIP POSITION and BACKGROUND COLOR AT THE TIP — never by needle color.\n"
+    "  ⚠ Needle color (black, yellow, white, red, brass) is IRRELEVANT. Ignore it entirely.\n"
+    "  ⚠ '195' printed on gauge is a SCALE LABEL, not the needle position.\n"
+    "  ⚠ A tilted needle on green still PASSES — natural gauge variation is normal.\n"
+    "  ⚠ Do NOT require perfect 12 o'clock alignment. The ENTIRE green arc is a PASS.\n"
+    "  ⚠ Only FAIL when the needle tip is genuinely outside the green colored area.\n"
+    "  ⚠ When in doubt and the tip appears to be on green background → PASS (do not fail conservatively)."
     ),
     "9": (
         "RULE — INSTRUCTION LABEL READABLE AND FACING OUTWARD:\n"
@@ -378,30 +434,19 @@ CHECKLIST_VISUAL_RULES = {
         "  - Label is partially or fully detached.\n"
         "  - No label is visible on the extinguisher body."
     ),
-      "10": (
-        "ITEM 10 — INSPECTION TAG:\n\n"
-        "DEFAULT ASSUMPTION: Tags with a visible grid ARE valid inspection records.\n"
-        "A pre-printed year grid (2025/2026/2027/2028/2029) with ANY physical mark, "
-        "hole, or darkening in a recent year cell = PASS.\n\n"
-        "PASS if ALL are true:\n"
-        "1. A tag is physically attached and visible.\n"
-        "2. ANY of the following is true for year 2025 or later:\n"
-        "   a. A punched hole is visible in that year's cell.\n"
-        "   b. A written/stamped mark, pen stroke, or ink mark is in that year's cell.\n"
-        "   c. The cell appears darker, circled, or physically marked vs blank cells.\n"
-        "   d. You can see any indication that the 2026 (or later) cell was acted upon.\n\n"
-        "FAIL ONLY IF:\n"
-        "- No tag is visible at all, OR\n"
-        "- The tag is completely destroyed/unreadable, OR\n"
-        "- ALL year cells from 2025 onward are clearly and completely blank with zero marks.\n\n"
-        "DO NOT FAIL because:\n"
-        "- You cannot see a clean circular hole (punch holes vary in appearance).\n"
-        "- A year was skipped (2026 punched, 2025 blank = VALID).\n"
-        "- Future years (2027–2029) are blank (normal, grid is pre-printed).\n"
-        "- You cannot read initials or a specific month.\n"
-        "- The image is slightly blurry but a mark is still visible.\n\n"
-        "IMPORTANT: When you see '2026 JAN' or similar on a tag that appears marked, "
-        "that IS the inspection record. Set recent_year_visible=yes.\n"
+    "10": (
+        "RULE — INSPECTION TAG ATTACHED AND DATED:\n"
+        "PASS only if ALL of the following are true:\n"
+        "  1. An inspection tag is physically attached and visible on the extinguisher.\n"
+        "  2. A mark, hole, ink, punch, or entry is visible for year 2025 or any later year.\n"
+        "     Even a faint mark or partial mark in the 2025 or later cell counts.\n"
+        "     Even just having the year 2025 or later printed on the tag grid counts.\n"
+        "FAIL if:\n"
+        "  - No tag is visible.\n"
+        "  - The tag is destroyed or completely unreadable.\n"
+        "  - ALL year cells from 2025 onward are clearly and completely blank with zero marks.\n"
+        "  - The tag's most recent year is 2024 or earlier.\n"
+        "NOTE: If the tag is present but you cannot read it clearly, FAIL and ask for a retake."
     ),
 }
 
@@ -421,13 +466,13 @@ VALIDATION_KEYWORDS = {
     "7": ["nozzle", "hose", "blocked", "blockage", "obstructed", "clogged", "free", "clear",
            "visible", "intact", "opening", "debris", "cap", "covered",
            "attached", "connected", "extinguisher"],
-    "8": ["gauge", "pressure", "needle", "green"],
-    "9": ["label", "instruction", "instructions", "facing outward", "front-facing", "aligned",
-           "readable", "visible", "clear", "clean", "blurry", "dust", "damaged", "peeled",
-           "folded", "attached", "legible"],
-    "10": ["tag", "date", "dated", "initial", "initialed", "torn", "dusty", "dirty",
-            "missing", "attached", "legible", "blurry", "illegible", "clean", "intact",
-            "visible", "month", "signed", "inspection"],
+    # FIX: Items 8, 9, 10 keyword validation removed — component items use
+    # enforce_component_checks which is authoritative. Keyword checks on
+    # component items silently killed valid passes when Claude's reason
+    # phrasing didn't exactly match these keywords.
+    "8": [],   # Disabled — enforce_component_checks is authoritative for item 8
+    "9": [],   # Disabled — enforce_component_checks is authoritative for item 9
+    "10": [],  # Disabled — enforce_component_checks is authoritative for item 10
 }
 
 # ------------------------------------------------------------------------------
@@ -504,88 +549,65 @@ Schema:
 }
 """
 
+# FIX: Rewrote COMPONENT_IMAGE_ANALYSIS_SYSTEM_PROMPT to fix the core contradiction:
+# Old version said "confirm target component is present" in a way that caused Claude
+# to set target_visible=false when the gauge was small in a full-extinguisher shot.
+# New version explicitly defines "visible" as "identifiable anywhere in the image,
+# even if small or angled" — which is the correct interpretation.
 COMPONENT_IMAGE_ANALYSIS_SYSTEM_PROMPT = """
 You are a STRICT fire extinguisher component inspector for OSHA compliance.
-You are analyzing CLOSE-UP images of specific components (pressure gauge, label, tag).
-Your decisions directly affect worker safety. When in doubt, FAIL.
+You are analyzing images of specific components (pressure gauge, label, tag).
+Your decisions directly affect worker safety.
 
 ═══════════════════════════════════════════════════════════════
 GOLDEN RULE: INCONCLUSIVE = FAIL
 If you cannot clearly confirm a condition is met, set pass=false.
-Never assume compliance from an unclear or partial image.
 ═══════════════════════════════════════════════════════════════
 
-IMPORTANT CONTEXT:
-  - For items 8–10, the full extinguisher body does NOT need to be visible.
-  - You are evaluating a SPECIFIC COMPONENT at close range.
-  - Even a perfectly clear extinguisher body is irrelevant — only the target component matters.
+CRITICAL — WHAT "target_visible=true" MEANS:
+  The component EXISTS somewhere in the image and you can describe what it looks like.
+  It does NOT need to fill the frame or be in close-up.
+  
+  SET target_visible=true if:
+  ✓ The gauge/label/tag is anywhere in the image, even small or at an angle
+  ✓ You can describe the component's appearance (e.g. "small round dial on the body")
+  ✓ The component is present but then FAILS its condition check
+  
+  SET target_visible=false ONLY if:
+  ✗ The component is literally not present anywhere in the image
+  ✗ The image shows something completely unrelated (empty wall, person's face, etc.)
+  ✗ You genuinely cannot find the component anywhere after examining the full image
 
-STEP 1 — TARGET COMPONENT VISIBILITY:
-  Confirm whether the requested target component is clearly and fully visible.
-  If it is blurry, partially cut off, in shadow, or not present → set pass=false.
+  KEY INSIGHT: target_visible=true and pass=false is a VALID and COMMON outcome.
+  A gauge that is present but shows low pressure → target_visible=true, pass=false.
+  A tag that is attached but has no 2025+ date → target_visible=true, pass=false.
+  Do NOT conflate "I can't confirm it passes" with "I can't see it."
+
+STEP 1 — COMPONENT PRESENCE:
+  Is the target component identifiable anywhere in the image?
+  If no → target_visible=false, pass=false, stop.
+  If yes → target_visible=true, then evaluate its condition.
 
 STEP 2 — CONDITION CHECK:
   Follow the strict visual rule for this checklist item EXACTLY.
-  Apply each sub-condition. If any sub-condition fails → overall pass=false.
+  Apply each sub-condition. If any sub-condition fails → pass=false.
 
-STEP 3 — CHECKS OBJECT:
-  Return the required `checks` fields per the contract in the user prompt.
-  Every field must be present with an explicit enum value — no nulls, no omissions.
-  If a field state is unclear → use "unclear" as the value AND set pass=false.
+STEP 3 — RETURN CHECKS:
+  Return every field in the checks object with explicit enum values.
+  No nulls. If genuinely unclear → use "unclear" AND set pass=false.
 
 ABSOLUTE RULES:
-1. pass=true only when ALL required checks pass their strict enum values.
-2. "unclear" in any check field → pass=false. No exceptions.
-3. Do NOT guess. Use only what is visibly clear in the image.
-4. reason must describe what you specifically see for the component.
-5. worker_message must be actionable and specific to what was wrong.
+1. pass=true only when ALL required checks pass their required enum values.
+2. "unclear" in any required check field → pass=false. No exceptions.
+3. reason must describe what you specifically SEE for the component.
+4. confidence: 0.85-1.0 if clearly visible and evaluated, 0.5-0.85 if visible but 
+   challenging to read, 0.3-0.5 if barely visible. Set >0 whenever you can see component.
 
 CORE EVIDENCE POLICY:
-- Judge only what is directly visible in the image.
-- Do not infer compliance or failure from dominant background colors.
-- For gauges, judge only whether the needle is pointing into the green zone.
-- If the required evidence is visible and readable, use it even in a far shot or at an angle.
-- If the required evidence is not clearly visible, fail.
-- Never guess on safety-critical checks.
-
-
-
-
-ITEM 8 SPECIAL RULE — PRESSURE GAUGE:
-  Judge needle zone by where it points, not by the color of the needle itself.
-  A yellow, black, or white needle is normal.
-
-  TYPE B GAUGE (red-dominant face):
-    The gauge face may be mostly red and that is normal.
-    CRITICAL: Do NOT mistake the printed white outer scale lines or the printed "195" marking as the moving needle.
-    If you mistake the printed lines for the needle, you will hallucinate a PASS on an overcharged gauge!
-    Identify the true needle attached to the center pivot.
-    PASS only when the TRUE needle is clearly inside the green band.
-    Needle clearly inside the green band = PASS
-
-  TYPE A GAUGE (common in Asia/India, e.g. Fire Boss):
-    Only two zones. RED on LEFT = recharge = FAIL. GREEN on RIGHT = PASS.
-    Needle pointing right = PASS.
-
-  TYPE C GAUGE (European sweep gauges: SAFESTAR, Gloria, Thomas):
-    Numeric scale sweeps in arc. Read the number the needle points to.
-    If within the labeled green band (typically 10–20 bar) = needle_zone = green = PASS.
-    Red zone takes up most of the arc — do NOT assume red just because red is dominant.
-
-  FOR ALL TYPES:
-    needle_zone = green → PASS (if glass is intact and readable)
-    needle_zone = red_recharge or red_overcharge or yellow → FAIL
-    needle_zone = unclear → FAIL (inconclusive = fail)
-    Fogged, cracked, or dusty glass → gauge_glass_condition ≠ intact → FAIL
-
-ITEM 10 SPECIAL RULE — INSPECTION TAG:
-  MAKE THIS CHECK EXTREMELY FORGIVING BUT REQUIRE A PUNCH.
-  If a tag is visible and you can confirm a PUNCH HOLE or MARK on ANY RECENT YEAR (2025, 2026, 2027+) in the grid, PASS it.
-  - Do NOT fail if a year is skipped (e.g. 2026 is punched but 2025 is empty).
-  - Do NOT fail if you see future years (e.g. 2028, 2029) unpunched. The printed grid itself is normal context.
-  - A punched hole in the year grid = VALID INSPECTION MARK.
-  - DO NOT require a specific month, inspector signature, or initials to be visible.
-  - Fail only if there is no tag, or if there is NO punch on 2025, NO punch on 2026, and NO punch on any future year.
+- For pressure gauges: judge needle POSITION relative to zones, not needle color.
+- '195' or any number printed on the gauge face = scale label, NOT the needle.
+- If required evidence is visible and readable, evaluate it even if small or angled.
+- Never guess — but never refuse to evaluate what you can actually see.
 
 Return JSON ONLY. No markdown. No extra text.
 
@@ -774,15 +796,7 @@ def extract_text_from_claude_response(resp: dict) -> str:
     return ""
 
 
-
 def prepare_image_bytes(image_bytes: bytes, content_type: str = "image/jpeg", for_yolo: bool = False) -> Tuple[bytes, str]:
-    """
-    Resize image for sending to backend services.
-    for_yolo=True:  Resize longest side to YOLO_IMAGE_SIZE, preserve aspect ratio.
-                  Do NOT letterbox here — SageMaker YOLO endpoint handles its own letterbox internally.
-                  Use higher quality to preserve small component details.
-    for_yolo=False: Standard resize for Bedrock (Claude), max width 800px.
-    """
     if Image is None:
         return image_bytes, content_type
     try:
@@ -791,17 +805,14 @@ def prepare_image_bytes(image_bytes: bytes, content_type: str = "image/jpeg", fo
             img = img.convert("RGB")
 
         if for_yolo:
-            # Resize longest side to YOLO_IMAGE_SIZE, keep aspect ratio.
-            # YOLO endpoint preprocesses internally with its own letterbox — do NOT add one here.
             longest = max(img.width, img.height)
             if longest > YOLO_IMAGE_SIZE:
                 scale = YOLO_IMAGE_SIZE / longest
                 new_w = max(1, int(img.width * scale))
                 new_h = max(1, int(img.height * scale))
                 img = img.resize((new_w, new_h), Image.LANCZOS)
-            quality = 92  # high quality — small components (nozzle, gauge) need detail
+            quality = 92
         else:
-            # Standard resize for Bedrock
             if img.width > MAX_IMAGE_WIDTH:
                 ratio = MAX_IMAGE_WIDTH / float(img.width)
                 new_size = (MAX_IMAGE_WIDTH, max(1, int(img.height * ratio)))
@@ -840,19 +851,15 @@ def load_inspection_by_session_id(session_id: str) -> Optional[dict]:
     session_id = str(session_id or "").strip()
     if not session_id:
         return None
-
     try:
         session = session_table.get_item(Key={"session_id": session_id}).get("Item")
     except Exception:
         return None
-
     if not session:
         return None
-
     inspection_id = str(session.get("inspection_id", "")).strip()
     if not inspection_id:
         return None
-
     return load_inspection(inspection_id)
 
 
@@ -881,25 +888,21 @@ def merge_item_records(existing_item: dict, incoming_item: dict) -> dict:
             elif key not in merged:
                 merged[key] = []
             continue
-
         if key == "blocked_by_wrong_image":
             merged[key] = bool(incoming_value)
             continue
-
         if isinstance(incoming_value, str):
             if incoming_value.strip():
                 merged[key] = incoming_value
             elif key not in merged:
                 merged[key] = incoming_value
             continue
-
         if isinstance(incoming_value, list):
             if incoming_value:
                 merged[key] = incoming_value
             elif key not in merged:
                 merged[key] = incoming_value
             continue
-
         if incoming_value is not None:
             merged[key] = incoming_value
 
@@ -913,7 +916,6 @@ def merge_categories(existing_categories: List[dict], incoming_categories: List[
     for incoming_cat in incoming_categories or []:
         if not isinstance(incoming_cat, dict):
             continue
-
         cat_id = str(incoming_cat.get("id", ""))
         existing_cat = existing_by_id.get(cat_id, {})
         merged_cat = copy.deepcopy(existing_cat) if existing_cat else {}
@@ -1037,11 +1039,6 @@ def process_async_analyze_worker(event: dict) -> dict:
         if isinstance(parsed_body, dict) and parsed_body.get("blocked") is True:
             job_status = "completed"
 
-        # NOTE: Do NOT attach full_inspection to the stored job result.
-        # Storing the full inspection inside the DynamoDB job record doubles
-        # the serialised payload and causes 502 errors when the polling client
-        # reads it back.  The polling handler (get_analyze_job_status) re-fetches
-        # a fresh inspection on its own when the job is complete.
         save_async_job(job_id, job_status, payload=payload, result=parsed_body)
         return {"ok": True, "job_id": job_id, "status": job_status}
     except Exception as e:
@@ -1070,13 +1067,13 @@ def expected_keywords_for_item(item_id: str) -> List[str]:
 
 
 def required_yolo_class_for_item(item_id: str) -> Optional[str]:
-    return None  # Claude handles all items directly — no YOLO gate
+    return None
 
 
 def item_zoom_hint(item_id: str) -> str:
     hints = {
         "7": "Show the full extinguisher with hose attached and nozzle tip clearly visible.",
-        "8": "Zoom in on the pressure gauge. Use the actual moving pressure needle, keep the gauge glass intact, and verify it is in the green zone.",
+        "8": "Zoom in on the pressure gauge. Keep the full gauge face and needle visible.",
         "9": "Zoom in on the instruction label. Keep label text facing camera, sharp, and readable.",
         "10": "Zoom in on the inspection tag. Keep date, initials, and tag edges visible and readable.",
     }
@@ -1131,12 +1128,12 @@ def component_check_contract(item_id: str) -> str:
             "Return checks with EXACTLY these fields and ONLY these enum values:\n"
             "  extinguisher_body_visible: true|false\n"
             "    true = a fire extinguisher cylindrical body is clearly visible in the image.\n"
-            "    false = no extinguisher body visible (e.g. only a standalone hose, only a hand holding nozzle, empty frame).\n"
+            "    false = no extinguisher body visible.\n"
             "  hose_attached_to_extinguisher: true|false\n"
             "    true = the hose is visibly connected/attached to an extinguisher body in this image.\n"
             "    false = the hose is detached, held in isolation, or the extinguisher has no hose visible.\n"
             "  target_visible: true|false  (is nozzle/hose visible from ANY angle?)\n"
-            "  nozzle_tip_visible: true|false  (can you see the nozzle tip from this angle? any angle counts)\n"
+            "  nozzle_tip_visible: true|false  (can you see the nozzle tip from this angle?)\n"
             "  external_obstruction: none|tape|cap|cloth|debris|unclear\n"
             "    none = nothing covering the OUTSIDE of the nozzle tip = PASS\n"
             "    tape/cap/cloth/debris = something visibly covering the outside = FAIL\n"
@@ -1147,44 +1144,80 @@ def component_check_contract(item_id: str) -> str:
             "target_visible=true AND nozzle_tip_visible=true AND "
             "external_obstruction=none AND hose_condition=clear AND nozzle_physical_condition=intact.\n\n"
             "CRITICAL RULES:\n"
-            "  - If only a standalone hose or nozzle is shown with no extinguisher body → extinguisher_body_visible=false, hose_attached_to_extinguisher=false → FAIL.\n"
-            "  - If the extinguisher body is present but only the top (handle/pin) is visible and NO hose is in frame → hose_attached_to_extinguisher=false → FAIL.\n"
+            "  - If only a standalone hose or nozzle is shown with no extinguisher body → FAIL.\n"
             "  - external_obstruction=none if the outside of the tip is clean and uncovered.\n"
-            "  - Do NOT set external_obstruction=unclear just because you cannot see into the bore.\n"
             "  - Shadow inside the opening ≠ blockage. external_obstruction=none in that case.\n"
             "  - A side-angle shot of a clean nozzle attached to an extinguisher body = PASS."
         ),
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ITEM 8 CONTRACT — REWRITTEN (v3)
+        #
+        # Changes from original:
+        #  1. Removed needle_trace_description — was consuming 80-120 of 220
+        #     available tokens before Claude reached the actual decision fields,
+        #     causing truncated JSON → parse_failed → blocked.
+        #  2. Simplified gauge_type to 4 values (was 7 with long descriptions).
+        #  3. Moved needle_zone FIRST so it gets the freshest token budget.
+        #  4. Compressed zone decision rules to ~30 lines instead of ~80.
+        #  5. Added concrete examples at end (not in middle) to avoid confusion.
+        #  6. Total estimated token cost: ~150 tokens for checks (was ~350).
+        # ─────────────────────────────────────────────────────────────────────
         "8": (
-            "Return checks with EXACTLY these fields and ONLY these enum values:\n"
+            "Return checks with EXACTLY these fields and ONLY these enum values.\n\n"
+            "IMPORTANT: The gauge does NOT need to fill the frame. A small gauge visible\n"
+            "on a full extinguisher shot is VALID — evaluate it.\n\n"
             "  target_visible: true|false\n"
-            "    true  = a pressure gauge is clearly visible in the image.\n"
-            "    false = no gauge visible, or gauge is cut off / completely obscured.\n"
-            "  needle_zone: green|red_recharge|red_overcharge|unclear\n"
-            "    green          = the physical needle tip is pointing INTO the green zone on the gauge face.\n"
-            "    red_recharge   = the needle tip is in a red zone on the LOW pressure side.\n"
-            "    red_overcharge = the needle tip is in a red zone on the HIGH pressure side.\n"
-            "    unclear        = cannot confidently determine which zone the needle tip is in.\n"
+            "    true  = Any pressure indicator is identifiable anywhere in the image.\n"
+            "            This includes: round dial gauge, arc gauge, red-face gauge,\n"
+            "            FireBoss window, popup pin, or any other pressure indicator.\n"
+            "            Small, angled, or partial = still true if you can evaluate it.\n"
+            "    false = No pressure indicator of any kind exists anywhere in the image.\n\n"
+            "  gauge_type: dial|window_indicator|popup_pin|unclear\n"
+            "    dial             = any needle/pointer gauge (round, arc, semicircle, any shape)\n"
+            "    window_indicator = flat window style (FireBoss), no moving needle\n"
+            "    popup_pin        = pressure pin, no needle\n"
+            "    unclear          = cannot determine type at all\n\n"
+            "  needle_zone: green|yellow_caution|red_recharge|red_overcharge|unclear\n"
+            "    ══ ZONE DETERMINATION — FOLLOW THESE STEPS ══\n\n"
+            "    STEP 1 — Identify the needle/indicator:\n"
+            "      Dial gauge: Find the pivot point (center hub). The NEEDLE is the thin moving\n"
+            "      pointer that rotates around it. Any NUMBER printed on the gauge face\n"
+            "      (e.g. '195', '0', '10', '20') is a SCALE LABEL — it is NOT the needle.\n"
+            "      Window indicator: which color is showing in the window?\n"
+            "      Popup pin: is the pin flush with the body or raised/protruding?\n\n"
+            "    STEP 2 — Map to zone:\n"
+            "      Needle in CENTER of scale / pointing straight up = GREEN\n"
+            "      Needle between RECHARGE and OVERCHARGED labels = GREEN\n"
+            "      Needle at far LEFT / near zero / near RECHARGE label = red_recharge\n"
+            "      Needle at far RIGHT / past max scale / near OVERCHARGED label = red_overcharge\n"
+            "      Needle just past green toward high end = yellow_caution\n"
+            "      Background color at tip: green bg = confirms green; red bg = confirms red zone\n"
+            "      White/blank area past max scale = red_overcharge\n"
+            "      Window green = green; Window red = red_recharge\n"
+            "      Pin flush = green; Pin raised = red_recharge\n\n"
+            "    Use unclear ONLY when you truly cannot locate or evaluate the indicator at all.\n\n"
             "  gauge_face_readability: readable|unreadable|unclear\n"
-            "    readable   = gauge face and colored zones are visible and legible.\n"
-            "    unreadable = heavily fogged, dusty, or obscured so zones cannot be read.\n"
+            "    readable = you could determine approximate needle position\n\n"
             "  gauge_glass_condition: intact|cracked|missing|unclear\n"
-            "    intact  = gauge glass is whole with no cracks.\n"
-            "    cracked = gauge glass is visibly cracked or broken.\n\n"
-            "HOW TO DETERMINE needle_zone (this is the only decision that matters):\n"
-            "  Step 1: Find the physical needle. It is the MOVING pointer attached to the center pivot.\n"
-            "          It is NOT a printed scale line, number, or arc printed on the gauge face.\n"
-            "  Step 2: Look at which COLORED ZONE the tip of that needle is pointing into.\n"
-            "  Step 3: Set needle_zone to that color. The zone color is the only factor.\n"
-            "  - Tip in GREEN zone → needle_zone = green\n"
-            "  - Tip in RED zone   → needle_zone = red_recharge or red_overcharge\n"
-            "  - Cannot clearly tell → needle_zone = unclear\n\n"
-            "PASS rule: target_visible=true AND needle_zone=green AND "
-            "gauge_face_readability=readable AND gauge_glass_condition=intact.\n"
-            "ANY other combination → pass=false.\n\n"
-        "CRITICAL: A red-dominant gauge FACE is normal on many gauge types.\n"
-            " - Do NOT set needle_zone=red just because the face background is red.\n"
-            "- Judge ONLY the colored zone the needle tip points into."
+            "    For window/pin indicators with no glass: use intact\n\n"
+            "PASS RULE:\n"
+            "  target_visible=true AND needle_zone=green\n"
+            "  AND gauge_face_readability=readable AND gauge_glass_condition=intact\n"
+            "  → pass=true. Any other combination → pass=false.\n\n"
+            "EXAMPLES:\n"
+            "  Round white/grey gauge, needle pointing up or into center green band → needle_zone=green → PASS\n"
+            "  Red face gauge (RECHARGE left, OVERCHARGED right), needle pointing to center top green area → needle_zone=green → PASS\n"
+            "  Semicircular gauge, needle in middle of arc → needle_zone=green → PASS\n"
+            "  Any gauge, needle far left near zero → needle_zone=red_recharge → FAIL\n"
+            "  Any gauge, needle far right past max → needle_zone=red_overcharge → FAIL\n"
+            "  FireBoss: green lit in window → needle_zone=green → PASS\n"
+            "  Popup pin: pin flush with body → needle_zone=green → PASS\n"
         ),
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ITEM 9 CONTRACT — unchanged from original (working correctly)
+        # ─────────────────────────────────────────────────────────────────────
         "9": (
             "Return checks with EXACTLY these fields and ONLY these enum values:\n"
             "  target_visible: true|false\n"
@@ -1198,17 +1231,55 @@ def component_check_contract(item_id: str) -> str:
             "label_physical_condition=intact AND label_attachment_state=attached.\n"
             "Any other combination → pass=false."
         ),
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ITEM 10 CONTRACT — REWRITTEN (v2)
+        #
+        # Changes from original:
+        #  1. year_identified placed BEFORE recent_year_visible so Claude
+        #     writes the year it sees first, then derives yes/no from it.
+        #  2. Clearer guidance on year grid tags (most common real-world case).
+        #  3. Explicit instruction: "any mark, hole, punch, ink dot = counts".
+        #  4. Removed ambiguity about when to use "none" vs "unclear".
+        #  5. Added concrete examples covering all common tag formats.
+        # ─────────────────────────────────────────────────────────────────────
         "10": (
-            "Return checks with EXACTLY these fields and ONLY these enum values:\n"
+            "Return checks with EXACTLY these fields and ONLY these enum values:\n\n"
             "  target_visible: true|false\n"
+            "    true  = An inspection tag or card is physically present somewhere in the image.\n"
+            "            It does not need to be fully readable — just present and identifiable.\n"
+            "    false = No tag of any kind is visible anywhere in the image.\n\n"
             "  tag_physically_attached: attached|detached|unclear\n"
+            "    attached = tag is clipped, wired, zip-tied, or otherwise connected to the extinguisher.\n"
+            "    detached = tag is clearly not attached (lying on floor, held in hand, etc.).\n"
+            "    unclear  = cannot determine attachment state.\n\n"
+            "  year_identified: <write the most recent year you can see on the tag, e.g. '2025', '2026'>\n"
+            "    INSTRUCTIONS — Look carefully at the tag:\n"
+            "    Common tag formats:\n"
+            "      A) Year grid: rows of years (2020, 2021 ... 2028) with monthly columns.\n"
+            "         A hole punch, ink mark, or any mark in a year's row = that year is present.\n"
+            "         Write the MOST RECENT year that has ANY mark, hole, or ink anywhere in its row.\n"
+            "      B) Date written/printed directly on tag: write that year.\n"
+            "      C) Year printed on the tag border or card without a grid: write that year.\n"
+            "    Write 'unclear' if the tag is present but you genuinely cannot read any year.\n"
+            "    Write 'none' ONLY if you can clearly see the entire tag and confirm it contains\n"
+            "    NO year from 2025 or later anywhere on it.\n\n"
             "  recent_year_visible: yes|no|unclear\n"
-            "    recent_year_visible=yes if ANY mark, hole, or darkening is visible\n"
-            "    in ANY year cell from 2025 onward. Be generous — marks vary in appearance.\n"
-            "  year_identified: <the year you see marked, e.g. '2026', or 'none'>\n"
-            "PASS rule: target_visible=true AND tag_physically_attached=attached AND recent_year_visible=yes.\n"
-            "CRITICAL: If you can see '2026' marked in any way on the tag, year_identified='2026' "
-            "and recent_year_visible=yes. Do not require a perfect punch hole.\n"
+            "    Derive DIRECTLY from year_identified — do NOT re-analyze:\n"
+            "      yes     = year_identified is '2025' or any later year ('2026', '2027', '2028', etc.)\n"
+            "      no      = year_identified is a year BEFORE 2025 (e.g. '2024', '2023', '2022')\n"
+            "                OR year_identified='none' (confirmed no 2025+ year on tag)\n"
+            "      unclear = year_identified='unclear' (tag present but year unreadable)\n"
+            "    SIMPLE RULE: if year_identified >= 2025 → yes. If < 2025 or none → no. If unclear → unclear.\n\n"
+            "PASS RULE:\n"
+            "  target_visible=true AND tag_physically_attached=attached AND recent_year_visible=yes\n"
+            "  → pass=true. Any other combination → pass=false.\n\n"
+            "EXAMPLES:\n"
+            "  Tag has '2026' written or punched → year_identified='2026', recent_year_visible=yes → PASS\n"
+            "  Tag grid has any mark in the 2025 row → year_identified='2025', recent_year_visible=yes → PASS\n"
+            "  Tag only goes to 2023, all blank → year_identified='none', recent_year_visible=no → FAIL\n"
+            "  Tag present but illegible → year_identified='unclear', recent_year_visible=unclear → FAIL\n"
+            "  Tag missing → target_visible=false → FAIL\n"
         ),
     }
     return contracts.get(str(item_id), "Return checks object for requested component with explicit enum states.")
@@ -1238,10 +1309,6 @@ def enforce_component_checks(
     worker_message: str,
     suggested_action: Optional[str],
 ) -> Tuple[bool, str, str, str, Optional[str]]:
-    """
-    Enforce strict component-level pass/fail rules regardless of what Claude returned.
-    This is the safety net that catches cases where Claude's pass=true is incorrect.
-    """
     checks = analysis.get("checks") if isinstance(analysis, dict) else None
     checks = checks if isinstance(checks, dict) else {}
 
@@ -1282,27 +1349,25 @@ def enforce_component_checks(
 
     # ── Item 7: Nozzle ───────────────────────────────────────────────────────
     if item == "7":
-        extinguisher_body_visible      = _bool("extinguisher_body_visible")
-        hose_attached_to_extinguisher  = _bool("hose_attached_to_extinguisher")
-        nozzle_tip_visible             = _bool("nozzle_tip_visible")
-        external_obstruction           = _state("external_obstruction")
-        hose_condition                 = _state("hose_condition")
-        nozzle_physical_condition      = _state("nozzle_physical_condition")
+        extinguisher_body_visible     = _bool("extinguisher_body_visible")
+        hose_attached_to_extinguisher = _bool("hose_attached_to_extinguisher")
+        nozzle_tip_visible            = _bool("nozzle_tip_visible")
+        external_obstruction          = _state("external_obstruction")
+        hose_condition                = _state("hose_condition")
+        nozzle_physical_condition     = _state("nozzle_physical_condition")
 
-        # Gate 0: Extinguisher body must be present
         if extinguisher_body_visible is not True:
             return force_fail(
                 "no_extinguisher_body_visible",
-                reason or "No fire extinguisher body is visible in the image. The hose/nozzle must be shown attached to an extinguisher.",
+                reason or "No fire extinguisher body is visible in the image.",
                 "Point camera at the extinguisher. Hose must be attached and visible.",
                 "Retake image showing the hose/nozzle attached to the fire extinguisher body.",
             )
 
-        # Gate 1: Hose must be attached to extinguisher
         if hose_attached_to_extinguisher is not True:
             return force_fail(
                 "hose_not_attached_to_extinguisher",
-                reason or "The hose or nozzle appears detached from the fire extinguisher body. It must be physically connected to the extinguisher to pass.",
+                reason or "The hose or nozzle appears detached from the fire extinguisher body.",
                 "Reattach hose to extinguisher. Retake image showing it connected.",
                 "Hose is detached or shown in isolation. Reconnect hose to extinguisher and retake.",
             )
@@ -1342,48 +1407,185 @@ def enforce_component_checks(
 
     # ── Item 8: Pressure Gauge ───────────────────────────────────────────────
     if item == "8":
-        needle_zone = _state("needle_zone")
+        # FIX: Updated field name from "gauge_type_identified" to "gauge_type"
+        # to match the rewritten contract.
+        needle_zone            = _state("needle_zone")
         gauge_face_readability = _state("gauge_face_readability")
-        gauge_glass_condition = _state("gauge_glass_condition")
+        gauge_glass_condition  = _state("gauge_glass_condition")
+        gauge_type             = _state("gauge_type")          # FIX: was "gauge_type_identified"
+        target_visible_raw     = _bool("target_visible")
 
+        # ── Self-correction layer 1: needle_zone has a real value ─────────────
+        # Claude clearly evaluated the gauge even if it set target_visible=false.
+        if target_visible_raw is not True and needle_zone in (
+            "green", "yellow_caution", "red_recharge", "red_overcharge"
+        ):
+            logger.warning(
+                f"[ITEM8] target_visible=false but needle_zone={needle_zone} "
+                f"— Claude evaluated gauge. Correcting target_visible=true."
+            )
+            checks["target_visible"] = True
+            target_visible_raw = True
+
+        # ── Self-correction layer 2: known gauge_type identified ──────────────
+        KNOWN_GAUGE_TYPES = {"dial", "window_indicator", "popup_pin",
+                             # legacy values from old contract, kept for safety:
+                             "full_circle_needle", "semicircular_bottom_pivot",
+                             "red_face_recharge_dial", "fireboss_window", "other_indicator",
+                             "needle_dial"}
+        if target_visible_raw is not True and gauge_type in KNOWN_GAUGE_TYPES:
+            logger.warning(
+                f"[ITEM8] target_visible=false but gauge_type={gauge_type} identified "
+                f"— correcting target_visible=true."
+            )
+            checks["target_visible"] = True
+            target_visible_raw = True
+
+        # ── Self-correction layer 3: face is readable ─────────────────────────
+        if target_visible_raw is not True and gauge_face_readability == "readable":
+            logger.warning(
+                f"[ITEM8] target_visible=false but gauge_face_readability=readable "
+                f"— correcting target_visible=true."
+            )
+            checks["target_visible"] = True
+            target_visible_raw = True
+
+        # ── Self-correction layer 4 (NEW): confidence > 0 means Claude saw it ─
+        # If all other signals are "unclear" but confidence > 0, Claude at least
+        # attempted evaluation — treat as target_visible. This catches the case
+        # where truncation caused all check fields to be "unclear" but Claude
+        # still set a nonzero confidence because it saw the gauge.
+        confidence_val = float(analysis.get("confidence", 0.0) or 0.0)
+        if target_visible_raw is not True and confidence_val > 0.0:
+            logger.warning(
+                f"[ITEM8] target_visible=false but confidence={confidence_val:.2f} > 0 "
+                f"— Claude attempted evaluation. Correcting target_visible=true. "
+                f"needle_zone={needle_zone} gauge_type={gauge_type}"
+            )
+            checks["target_visible"] = True
+            target_visible_raw = True
+
+        # ── Hard gate — only fires if gauge truly not visible ─────────────────
+        if target_visible_raw is not True:
+            return force_fail(
+                "target_not_visible",
+                reason or "No pressure gauge or pressure indicator is visible in the image.",
+                "Zoom in on the pressure gauge so it fills the frame clearly.",
+                "Retake close-up image with the pressure gauge fully visible and in focus.",
+            )
+
+        # ── Zone resolution from trace signals ────────────────────────────────
+        # Note: needle_trace_description removed from contract but kept here for
+        # backward compatibility with any responses that still include it.
+        needle_trace = str(checks.get("needle_trace_description", "")).lower()
+        needle_color_seen = str(checks.get("needle_color_zone_seen", "")).lower()
+        combined_trace = needle_trace + " " + needle_color_seen
+
+        overcharge_signals = [
+            "overcharg", "past max", "far right", "beyond max", "right side",
+            "too high", "past normal", "past the max", "past maximum",
+            "past green", "beyond green"
+        ]
+        recharge_signals = [
+            "recharge", "far left", "near zero", "low pressure",
+            "left side", "too low", "empty side"
+        ]
+        green_signals = [
+            "green zone", "green area", "green arc", "green background",
+            "center zone", "middle", "normal range", "between recharge",
+            "between the labels", "straight up", "upward", "center band",
+            "center top", "center of scale"
+        ]
+
+        if needle_zone == "unclear":
+            if any(s in combined_trace for s in overcharge_signals):
+                logger.warning(f"[ITEM8] Resolving unclear → red_overcharge from trace signals")
+                checks["needle_zone"] = "red_overcharge"
+                needle_zone = "red_overcharge"
+            elif any(s in combined_trace for s in recharge_signals):
+                logger.warning(f"[ITEM8] Resolving unclear → red_recharge from trace signals")
+                checks["needle_zone"] = "red_recharge"
+                needle_zone = "red_recharge"
+            elif any(s in combined_trace for s in green_signals):
+                logger.warning(f"[ITEM8] Resolving unclear → green from trace signals")
+                checks["needle_zone"] = "green"
+                needle_zone = "green"
+
+        # Also resolve from the main reason text if needle_zone is still unclear
+        if needle_zone == "unclear" and reason:
+            reason_lower = reason.lower()
+            if any(s in reason_lower for s in green_signals):
+                logger.warning(f"[ITEM8] Resolving unclear → green from reason text")
+                checks["needle_zone"] = "green"
+                needle_zone = "green"
+            elif any(s in reason_lower for s in recharge_signals):
+                logger.warning(f"[ITEM8] Resolving unclear → red_recharge from reason text")
+                checks["needle_zone"] = "red_recharge"
+                needle_zone = "red_recharge"
+            elif any(s in reason_lower for s in overcharge_signals):
+                logger.warning(f"[ITEM8] Resolving unclear → red_overcharge from reason text")
+                checks["needle_zone"] = "red_overcharge"
+                needle_zone = "red_overcharge"
+
+        # Correct red_recharge when all evidence points to green
+        if (
+            needle_zone == "red_recharge"
+            and gauge_type in ("dial", "red_face_recharge_dial", "full_circle_needle",
+                               "needle_dial", "semicircular_bottom_pivot")
+            and not any(s in combined_trace for s in recharge_signals)
+            and not any(s in combined_trace for s in overcharge_signals)
+            and any(s in combined_trace for s in green_signals)
+        ):
+            logger.warning(
+                f"[ITEM8] Correcting red_recharge → green. "
+                f"No recharge/overcharge signals, green signals present."
+            )
+            checks["needle_zone"] = "green"
+            needle_zone = "green"
+
+        # ── Evaluate fail conditions ──────────────────────────────────────────
         fail_conditions = []
         if needle_zone != "green":
-            if needle_zone == "red_recharge":
-                fail_conditions.append("needle in RED RECHARGE zone — extinguisher needs recharging")
-            elif needle_zone == "red_overcharge":
-                fail_conditions.append("needle in RED OVERCHARGE zone — pressure is too high")
-            elif needle_zone == "yellow":
-                fail_conditions.append("needle in YELLOW zone — pressure is marginal")
+            if needle_zone in ("red_recharge", "red_left"):
+                fail_conditions.append("pressure too LOW — recharge needed")
+            elif needle_zone in ("red_overcharge", "red_right"):
+                fail_conditions.append("pressure too HIGH — overcharged")
+            elif needle_zone in ("yellow_caution", "yellow", "orange"):
+                fail_conditions.append("pressure in CAUTION zone — marginal, service soon")
             else:
-                fail_conditions.append(f"needle zone is '{needle_zone}' — not confirmed as green")
+                fail_conditions.append(f"pressure zone '{needle_zone}' not confirmed adequate")
 
         if gauge_face_readability not in ("readable", ""):
-            fail_conditions.append(f"gauge face readability={gauge_face_readability}")
+            fail_conditions.append(f"gauge readability={gauge_face_readability}")
         if gauge_glass_condition not in ("intact", ""):
-            fail_conditions.append(f"gauge glass condition={gauge_glass_condition}")
+            fail_conditions.append(f"gauge glass={gauge_glass_condition}")
 
         if fail_conditions:
             detail = "; ".join(fail_conditions)
-            if "recharge" in detail:
-                action = "Extinguisher needs recharging — remove from service and replace immediately."
-                msg    = "Pressure too low. Extinguisher needs recharging. Remove from service."
-            elif "overcharge" in detail:
-                action = "Extinguisher is overcharged — remove from service and have it inspected."
+            if "LOW" in detail or "recharge" in detail.lower():
+                msg    = "Pressure too low. Remove from service immediately."
+                action = "Extinguisher needs recharging — remove from service and replace."
+            elif "HIGH" in detail or "overcharg" in detail.lower():
                 msg    = "Pressure too high. Remove from service for inspection."
-            elif "glass" in detail:
-                action = "Gauge glass is damaged. Replace or service the extinguisher."
-                msg    = "Gauge glass is damaged. Extinguisher needs servicing."
+                action = "Extinguisher is overcharged — remove from service and inspect."
+            elif "CAUTION" in detail or "marginal" in detail:
+                msg    = "Pressure marginal. Schedule servicing soon."
+                action = "Pressure in caution zone — schedule servicing before it drops further."
+            elif "glass" in detail or "readability" in detail:
+                msg    = "Gauge is damaged or unreadable. Service the extinguisher."
+                action = "Gauge damaged or unreadable — extinguisher needs servicing."
             else:
-                action = "Retake clear close-up of gauge with needle and zone clearly visible."
-                msg    = "Gauge unreadable. Retake closer, clearer image of gauge face."
+                msg    = "Gauge unreadable. Retake a clearer close-up."
+                action = "Retake clear close-up of gauge with full face and needle visible."
             return force_fail(
                 "gauge_failed",
                 reason or f"Pressure gauge failed: {detail}.",
                 msg,
                 action,
             )
+
         analysis["pass"] = True
-        return True, (condition_checked or "gauge_needle_in_green_zone"), reason, worker_message, suggested_action
+        return True, (condition_checked or "gauge_pressure_adequate"), reason, worker_message, suggested_action
 
     # ── Item 9: Instruction Label ────────────────────────────────────────────
     if item == "9":
@@ -1420,21 +1622,32 @@ def enforce_component_checks(
     if item == "10":
         tag_physically_attached = _state("tag_physically_attached")
         recent_year_visible     = _state("recent_year_visible")
+        year_identified         = _state("year_identified")
 
         fail_conditions = []
         if tag_physically_attached != "attached":
             fail_conditions.append("tag is NOT attached to the extinguisher")
         if recent_year_visible != "yes":
-            fail_conditions.append("a recent year (2025 or later) is not visible on the tag")
+            fail_conditions.append("no year from 2025 onwards is visible on the tag")
+
+        # Override: Claude said yes but identified a year before 2025
+        if recent_year_visible == "yes" and year_identified and year_identified not in ("none", "unclear", ""):
+            try:
+                identified_year = int(re.sub(r'[^0-9]', '', str(year_identified)))
+                if identified_year > 0 and identified_year < 2025:
+                    fail_conditions.append(f"year identified ({identified_year}) is before 2025")
+                    recent_year_visible = "no"
+            except (ValueError, TypeError):
+                pass
 
         if fail_conditions:
             detail = "; ".join(fail_conditions)
             if "NOT attached" in detail:
                 msg    = "Tag is missing or detached. Attach a new inspection tag."
                 action = "Attach a new inspection tag with current date and initials."
-            elif "DATE" in detail or "INITIALS" in detail:
-                msg    = "Tag is present but date or initials are not readable. Update and retake."
-                action = "Update tag with current date and initials. Retake close-up of the tag."
+            elif "2025" in detail or "year" in detail.lower():
+                msg    = "Inspection tag does not show a 2025 or later date. Update and retake."
+                action = "Update tag with current year and initials. Retake close-up of the tag."
             else:
                 msg    = "Inspection tag failed condition check. Fix and retake."
                 action = "Replace or update inspection tag with current signed monthly details."
@@ -1447,7 +1660,7 @@ def enforce_component_checks(
         analysis["pass"] = True
         return True, (condition_checked or "tag_attached_legible_dated_initialed"), reason, worker_message, suggested_action
 
-    # ── Fallback for unexpected item_ids ────────────────────────────────────
+    # ── Fallback ─────────────────────────────────────────────────────────────
     return passed, condition_checked, reason, worker_message, suggested_action
 
 
@@ -1707,29 +1920,15 @@ def create_session(event: dict) -> dict:
 
 
 def create_inspection_from_session_payload(event: dict) -> dict:
-    """
-    Submit or update an inspection with a categories payload.
-
-    Lookup priority for finding the right inspection record:
-      1. session_id  → session table → session["inspection_id"]  (original path)
-      2. inspection_id from request body                          (fallback)
-
-    This means QR/Voice/Auditor flows that save inspection_id in InspectionStore
-    but do NOT send session_id in the payload will still update the correct,
-    already-created record instead of creating a duplicate.
-
-    No new endpoints are added. The router below decides which flows reach here.
-    """
     body = parse_body(event)
 
     session_id         = str(body.get("session_id", "")).strip()
-    body_inspection_id = str(body.get("inspection_id", "")).strip()   # ← fallback
+    body_inspection_id = str(body.get("inspection_id", "")).strip()
     team               = body.get("team", [])
     categories         = body.get("categories", [])
     general_results    = body.get("general_results", [])
     notes              = str(body.get("notes", "")).strip() if isinstance(body.get("notes", ""), str) else ""
 
-    # --- validation (unchanged) -----------------------------------------------
     if len(notes) > 5000:
         return json_response(400, {"error": "notes must be under 5000 characters"})
     if not isinstance(general_results, list):
@@ -1755,14 +1954,6 @@ def create_inspection_from_session_payload(event: dict) -> dict:
             if "answer" not in item:
                 return json_response(400, {"error": f"Item at index {j} in category '{cat.get('name')}' is missing answer"})
 
-    # --- resolve session + inspection_id ---------------------------------------
-    #
-    # Path A: session_id provided → look up session table → get inspection_id
-    # Path B: session not found / session_id blank → use body inspection_id directly
-    #         and build a minimal synthetic session so the rest of the function
-    #         can run without any code changes.
-    # Path C: neither found → 404
-    #
     session       = None
     inspection_id = ""
 
@@ -1771,14 +1962,10 @@ def create_inspection_from_session_payload(event: dict) -> dict:
         session      = session_resp.get("Item")
         if session:
             inspection_id = str(session.get("inspection_id", "")).strip()
-            logger.info(f"[SUBMIT] path A — session_id={session_id} inspection_id={inspection_id}")
 
     if not inspection_id and body_inspection_id:
-        # Path B: client already knows its inspection_id (QR / Voice / Auditor flows).
-        # Load the existing record to pull auditor_name / facility_area / date_of_audit
-        # so the merge below has accurate metadata.
-        inspection_id       = body_inspection_id
-        existing_for_meta   = load_inspection(inspection_id)
+        inspection_id     = body_inspection_id
+        existing_for_meta = load_inspection(inspection_id)
         if existing_for_meta:
             session = {
                 "auditor_name":  str(existing_for_meta.get("auditor_name",  body.get("auditor_name",  ""))).strip(),
@@ -1786,22 +1973,17 @@ def create_inspection_from_session_payload(event: dict) -> dict:
                 "date_of_audit": str(existing_for_meta.get("date_of_audit", body.get("date_of_audit", ""))).strip(),
             }
         else:
-            # Brand-new inspection that somehow has an ID but no record yet —
-            # build session purely from body fields.
             session = {
                 "auditor_name":  str(body.get("auditor_name",  "")).strip(),
                 "facility_area": str(body.get("facility_area", "")).strip(),
                 "date_of_audit": str(body.get("date_of_audit", "")).strip(),
             }
-        logger.info(f"[SUBMIT] path B — body inspection_id={inspection_id} (session_id was blank or not found)")
 
     if not session:
         return json_response(404, {"error": "Session not found. Create session first."})
 
     if not inspection_id:
-        # Safety net — should not normally be reached
         inspection_id = str(uuid.uuid4())
-        logger.warning(f"[SUBMIT] no inspection_id resolved — generating new: {inspection_id}")
         if session_id:
             try:
                 session_table.update_item(
@@ -1812,7 +1994,6 @@ def create_inspection_from_session_payload(event: dict) -> dict:
             except Exception:
                 logger.exception("Failed to persist generated inspection_id back to session table")
 
-    # --- load existing record and merge (logic unchanged) ---------------------
     existing_inspection = load_inspection(inspection_id)
 
     created_at = str(existing_inspection.get("created_at", "")).strip() if existing_inspection else now_iso()
@@ -1848,8 +2029,6 @@ def create_inspection_from_session_payload(event: dict) -> dict:
     merged_notes = notes if notes else str(existing_inspection.get("notes", "")).strip() if existing_inspection else ""
     merged_team  = team if isinstance(team, list) and team else (existing_inspection.get("team", []) if existing_inspection else [])
 
-    # Preserve the original session_id stored on the record when the submit
-    # came via Path B (session_id blank in the payload).
     preserved_session_id = session_id or (str(existing_inspection.get("session_id", "")).strip() if existing_inspection else "")
 
     merged_record = copy.deepcopy(existing_inspection) if existing_inspection else {}
@@ -1871,15 +2050,9 @@ def create_inspection_from_session_payload(event: dict) -> dict:
     })
 
     inspection_table.put_item(Item=sanitize_for_dynamodb(merged_record))
-
-    # Re-read what was actually written so the client gets exact data
     saved_inspection = load_inspection(inspection_id) or merged_record
 
     status_code = 201 if not existing_inspection else 200
-    # Return only lightweight fields — the Android app navigates immediately
-    # after submit and does not use the full inspection blob here.
-    # Returning the full inspection (with all evidence) was pushing the
-    # response past API Gateway's 6 MB limit and causing 502 errors.
     return json_response(status_code, {
         "inspection_id": inspection_id,
         "session_id":    preserved_session_id,
@@ -2158,7 +2331,6 @@ def analyze_item_image(event: dict) -> dict:
     if checklist_item is None:
         return json_response(404, {"error": "Checklist item not found"})
 
-    # Items 11 and 12 are auto-calculated — no image needed
     if str(item_id) in ["11", "12"]:
         update_summary_items(inspection)
         inspection["status"]     = compute_status(inspection)
@@ -2180,7 +2352,6 @@ def analyze_item_image(event: dict) -> dict:
             "categories":         inspection.get("categories", []),
         })
 
-    # Extract image
     try:
         image_bytes, content_type = _extract_image_from_request(body)
     except FileNotFoundError as e:
@@ -2193,28 +2364,23 @@ def analyze_item_image(event: dict) -> dict:
     if image_bytes is None:
         return json_response(400, {"error": "Provide image_base64 or file_key"})
 
-    # Prepare YOLO and Bedrock images from original bytes
     original_image_bytes = image_bytes
     is_yolo_item = bool(required_yolo_class_for_item(item_id))
 
     if is_yolo_item:
-        # Prepare YOLO-sized and Bedrock-sized images IN PARALLEL.
-        # PIL resize is I/O-light but CPU-bound; running both at once on
-        # separate threads saves ~100-200ms per items-7-10 request.
-        yolo_future   = _THREAD_POOL.submit(prepare_image_bytes, original_image_bytes, content_type, True)
+        yolo_future    = _THREAD_POOL.submit(prepare_image_bytes, original_image_bytes, content_type, True)
         bedrock_future = _THREAD_POOL.submit(prepare_image_bytes, original_image_bytes, content_type, False)
         yolo_image_bytes,   normalized_type = yolo_future.result(timeout=30)
         bedrock_image_bytes, bedrock_type   = bedrock_future.result(timeout=30)
-        image_bytes = yolo_image_bytes  # used for YOLO gate below
+        image_bytes = yolo_image_bytes
     else:
         image_bytes, normalized_type = prepare_image_bytes(
             original_image_bytes, content_type, for_yolo=False
         )
         bedrock_image_bytes = image_bytes
         bedrock_type = normalized_type
-    logger.info(f"[TIMING] after image extract/prepare (parallel): {time.time() - t0:.2f}s")
+    logger.info(f"[TIMING] after image extract/prepare: {time.time() - t0:.2f}s")
 
-    # YOLO gate for items 7-10
     yolo_detections: List[dict] = []
     yolo_target      = required_yolo_class_for_item(item_id)
     yolo_target_conf = 0.0
@@ -2223,10 +2389,9 @@ def analyze_item_image(event: dict) -> dict:
         if not YOLO_ENDPOINT_NAME:
             return json_response(500, {"error": "YOLO endpoint is required for checklist items 7-10 but YOLO_ENDPOINT_NAME is not configured"})
 
-        logger.info(f"[TIMING] calling YOLO endpoint: {YOLO_ENDPOINT_NAME}")
         yolo_t      = time.time()
         yolo_result = invoke_yolo_endpoint(image_bytes, normalized_type)
-        logger.info(f"[TIMING] YOLO done: {time.time() - yolo_t:.2f}s total: {time.time() - t0:.2f}s result={'None' if yolo_result is None else len(yolo_result)}")
+        logger.info(f"[TIMING] YOLO done: {time.time() - yolo_t:.2f}s total: {time.time() - t0:.2f}s")
 
         if yolo_result is None:
             return json_response(502, {"error": "YOLO endpoint unavailable. Please retry."})
@@ -2283,7 +2448,7 @@ def analyze_item_image(event: dict) -> dict:
                 "object_detected":        "unclear",
                 "condition_checked":      f"{yolo_target}_not_visible",
                 "confidence":             yolo_target_conf,
-                "message":                worker_message or ("Target component not clear. Move closer and retake." if component_focus else "No fire extinguisher detected. Point camera directly at the extinguisher."),
+                "message":                worker_message,
                 "reason":                 reason,
                 "suggested_action":       zoom_hint or "Retake image with target object clearly visible.",
                 "updated_item":           checklist_item,
@@ -2316,12 +2481,13 @@ def analyze_item_image(event: dict) -> dict:
             f"- strict_visual_rule: {rule}\n"
             f"- required_checks_contract: {contract_text}\n"
             f"- expected_location_hint: {expected_location or 'not provided'}\n\n"
-            f"STEP 1: Is the target_component clearly visible in this image?\n"
-            f"STEP 2: If yes, does the image clearly satisfy strict_visual_rule?\n"
+            f"STEP 1: Is the target_component identifiable anywhere in this image?\n"
+            f"  Remember: target_visible=true even if the component is small or the full\n"
+            f"  extinguisher body is also visible. Only set target_visible=false if the\n"
+            f"  component is completely absent from the image.\n"
+            f"STEP 2: If yes, does it satisfy the strict_visual_rule? Evaluate each sub-condition.\n"
             f"STEP 3: Return checks object exactly per required_checks_contract.\n"
-            f"Do NOT require full extinguisher body visibility.\n"
             f"Do not guess. If the required condition is not clearly visible, fail.\n"
-            f"Ignore all people, PPE, and background.\n"
             f"Return JSON only."
         )
     else:
@@ -2334,8 +2500,7 @@ def analyze_item_image(event: dict) -> dict:
                 f"- expected_location_hint: {expected_location or 'not provided'}\n\n"
                 f"STEP 1: Is a fire extinguisher clearly visible in this image?\n"
                 f"STEP 2: Is the hose physically connected to the extinguisher body AND visible?\n"
-                f"STEP 3: Is the nozzle tip or hose end LITERALLY VISIBLE in the image pixels? "
-                f"Not assumed — actually visible as a shape you can describe.\n"
+                f"STEP 3: Is the nozzle tip or hose end LITERALLY VISIBLE in the image pixels?\n"
                 f"STEP 4: If nozzle tip IS visible — is it free of tape, cap, cloth, debris?\n\n"
                 f"CRITICAL: You must answer each step based ONLY on what you can literally see.\n"
                 f"Do NOT assume the nozzle is fine because the extinguisher body looks good.\n"
@@ -2358,8 +2523,6 @@ def analyze_item_image(event: dict) -> dict:
                 f'    "nozzle_physical_condition": "intact|cracked|melted|broken|unclear"\n'
                 f'  }}\n'
                 f"}}\n"
-                f"nozzle_tip_visible = true ONLY if you can literally describe the shape of the nozzle tip or hose end in the image.\n"
-                f"If the extinguisher is small, far away, or only the body/top is visible → nozzle_tip_visible = false.\n"
                 f"Return JSON only."
             )
         else:
@@ -2379,12 +2542,18 @@ def analyze_item_image(event: dict) -> dict:
 
     try:
         bedrock_t = time.time()
+        # FIX: Use 600 tokens for component items (8,9,10).
+        # Original 220 tokens was causing JSON truncation for item 8 whose
+        # contract alone requires ~350 tokens to complete. Truncated JSON →
+        # parse_failed → confidence=0.0 → blocked. 600 tokens gives comfortable
+        # headroom for all component item contracts.
+        _max_tokens = 600 if component_focus else 220
         analysis = invoke_claude_json(
             system_prompt=COMPONENT_IMAGE_ANALYSIS_SYSTEM_PROMPT if component_focus else IMAGE_ANALYSIS_SYSTEM_PROMPT,
             user_text=prompt,
-            image_bytes=bedrock_image_bytes,   # use bedrock-sized version
+            image_bytes=bedrock_image_bytes,
             media_type=bedrock_type,
-            max_tokens=220,
+            max_tokens=_max_tokens,
         )
         logger.info(f"[TIMING] Bedrock done: {time.time() - bedrock_t:.2f}s total: {time.time() - t0:.2f}s")
     except Exception as e:
@@ -2402,7 +2571,7 @@ def analyze_item_image(event: dict) -> dict:
     if suggested_action is not None:
         suggested_action = str(suggested_action).strip() or None
 
-    # ── Item 7 structured check enforcement (hallucination prevention) ──────
+    # ── Item 7 structured check enforcement ────────────────────────────────
     if str(item_id) == "7" and isinstance(analysis.get("checks"), dict):
         checks7 = analysis["checks"]
 
@@ -2459,7 +2628,6 @@ def analyze_item_image(event: dict) -> dict:
             reason           = item7_fail_reason
             worker_message   = item7_msg
             suggested_action = item7_action
-            logger.warning(f"[ITEM7] Structured check enforcement → FAIL. reason={item7_fail_reason}")
 
     if component_focus:
         passed, condition_checked, reason, worker_message, suggested_action = enforce_component_checks(
@@ -2474,7 +2642,7 @@ def analyze_item_image(event: dict) -> dict:
 
     # Hard safety guard — non-component items only
     if (not component_focus) and passed and object_detected != "fire_extinguisher":
-        logger.warning(f"AI returned pass=true with object_detected={object_detected} confidence={confidence} — overriding to false. item_id={item_id}")
+        logger.warning(f"AI returned pass=true with object_detected={object_detected} — overriding. item_id={item_id}")
         passed              = False
         object_detected     = "other"
         confidence          = 0.0
@@ -2496,8 +2664,13 @@ def analyze_item_image(event: dict) -> dict:
         worker_message    = "Extinguisher detected but image is not clear enough. Move closer and retake."
         condition_checked = "not_visible"
 
+    # FIX: Added "not component_focus" guard to keyword validation.
+    # Previously this ran for ALL items including component items 8,9,10.
+    # For component items, enforce_component_checks is the authoritative
+    # pass/fail decision. The keyword check was silently killing valid passes
+    # when Claude's reason text didn't happen to use exact keyword matches.
     expected_keywords = expected_keywords_for_item(item_id)
-    if passed and expected_keywords:
+    if passed and expected_keywords and not component_focus:
         lower_reason = reason.lower()
         if not any(keyword in lower_reason for keyword in expected_keywords):
             logger.warning(f"Checklist condition not validated in reason -> overriding FAIL. item_id={item_id}, reason={reason}")
@@ -2534,7 +2707,7 @@ def analyze_item_image(event: dict) -> dict:
         condition_checked=condition_checked,
     )
 
-    # Special case: item 1 — extinguisher genuinely missing from location
+    # Special case: item 1 — extinguisher genuinely missing
     if blocked and str(item_id) == "1":
         reason_text        = reason or ""
         missing_keywords   = ["missing", "empty", "no extinguisher", "not present", "absent", "bracket"]
@@ -2571,7 +2744,6 @@ def analyze_item_image(event: dict) -> dict:
     checklist_item.setdefault("evidence", [])
     checklist_item["evidence"].append(evidence_record)
 
-    # BLOCKED
     if blocked:
         checklist_item["blocked_by_wrong_image"] = True
         checklist_item["answer"]                  = ""
@@ -2601,7 +2773,6 @@ def analyze_item_image(event: dict) -> dict:
             "categories":         inspection.get("categories", []),
         })
 
-    # SCORED
     checklist_item["answer"]               = "Yes" if passed else "No"
     checklist_item["blocked_by_wrong_image"] = False
     checklist_item["finding"]              = finding_text
@@ -2658,7 +2829,6 @@ def get_analyze_job_status(event: dict) -> dict:
 
     result = job.get("result")
 
-    # Re-fetch fresh inspection when job is done so polling clients get latest state
     if job.get("job_status") == "completed" and isinstance(result, dict):
         inspection_id = str(result.get("inspection_id", "")).strip()
         if inspection_id:
@@ -2692,20 +2862,10 @@ def get_inspection_report(event: dict) -> dict:
     if not inspection:
         return json_response(404, {"error": "Inspection not found"})
 
-    # ── AGGRESSIVELY strip heavy fields ─────────────────────────────────────
-    # Root cause: repeated photo retakes accumulate evidence entries that
-    # collectively push the response past API Gateway's 6 MB hard limit.
-    # Strategy:
-    #   1. Keep ONLY the latest evidence entry per item (most recent analysis).
-    #   2. Drop verbose string fields (reason, worker_message) from evidence.
-    #   3. Cap all item-level string fields.
-    #   4. Fallback tier 1 → strip to file_key only  (>4 MB)
-    #   5. Fallback tier 2 → nuclear metadata-only   (>5.5 MB)
     for cat in inspection.get("categories", []):
         for item in cat.get("items", []):
             cleaned_evidence = []
             for ev in item.get("evidence", []):
-                # Handle evidence as either dict or string (data corruption edge case)
                 if isinstance(ev, dict):
                     slim_ev = {
                         "file_key":          str(ev.get("file_key", ""))[:300],
@@ -2716,11 +2876,9 @@ def get_inspection_report(event: dict) -> dict:
                         "is_compliant":      ev.get("is_compliant", False),
                         "confidence":        ev.get("confidence", 0.0),
                         "blocked":           ev.get("blocked", False),
-                        # reason / worker_message / suggested_action intentionally omitted
                     }
                     cleaned_evidence.append(slim_ev)
                 elif isinstance(ev, str) and ev.strip():
-                    # Fallback: if evidence is a string (file path), treat as file_key
                     slim_ev = {
                         "file_key": str(ev)[:300],
                         "analyzed_at": "",
@@ -2732,19 +2890,15 @@ def get_inspection_report(event: dict) -> dict:
                         "blocked": False,
                     }
                     cleaned_evidence.append(slim_ev)
-            # Keep only the latest evidence entry — historical ones bloat the response
             item["evidence"] = cleaned_evidence[-1:] if cleaned_evidence else []
 
-            # Cap string fields on the item itself
             for field in ["finding", "action_item", "responsible"]:
                 if field in item:
                     item[field] = str(item.get(field, ""))[:200]
 
-    # Cap notes
     if "notes" in inspection:
         inspection["notes"] = str(inspection.get("notes", ""))[:1000]
 
-    # Slim general_results (remove it first, re-add slimmed)
     raw_general_results = inspection.pop("general_results", []) or []
     slim_results = []
     for r in raw_general_results:
@@ -2756,12 +2910,10 @@ def get_inspection_report(event: dict) -> dict:
         })
     inspection["general_results"] = slim_results
 
-    # Measure serialised size
     body_str = json.dumps(inspection, default=str)
     size_kb  = len(body_str.encode("utf-8")) / 1024
     logger.info(f"[REPORT] inspection_id={inspection_id} response_size={size_kb:.1f}KB")
 
-    # Fallback tier 1 — strip evidence down to file_key only
     if size_kb > 4000:
         logger.error(f"[REPORT] Still too large ({size_kb:.1f}KB) — stripping all evidence to file_key only")
         for cat in inspection.get("categories", []):
@@ -2775,7 +2927,6 @@ def get_inspection_report(event: dict) -> dict:
         size_kb  = len(body_str.encode("utf-8")) / 1024
         logger.info(f"[REPORT] After tier-1 strip: {size_kb:.1f}KB")
 
-    # Fallback tier 2 (nuclear) — return metadata + categories only, no evidence at all
     if size_kb > 5500:
         logger.error(f"[REPORT] NUCLEAR: {size_kb:.1f}KB — returning metadata-only response")
         for cat in inspection.get("categories", []):
@@ -2891,9 +3042,6 @@ def voice_command(event: dict) -> dict:
     if not text:
         return json_response(400, {"error": "text is required"})
 
-    # ── Parallel: DynamoDB load + local intent parse run simultaneously ────────
-    # Local parsing is instant (regex), but we also kick off the DynamoDB read
-    # at the same time. On cache-miss this saves ~300ms of sequential wait.
     def _load_inspection_and_item():
         if not (inspection_id and current_item_id):
             return None, None
@@ -2904,9 +3052,8 @@ def voice_command(event: dict) -> dict:
         return insp, item
 
     dynamo_future = _THREAD_POOL.submit(_load_inspection_and_item)
-    local         = parse_voice_intent_locally(text)   # instant — runs on this thread
+    local         = parse_voice_intent_locally(text)
 
-    # Now resolve the DynamoDB result (may already be done)
     try:
         inspection, current_item = dynamo_future.result(timeout=5)
     except Exception:
@@ -2932,7 +3079,6 @@ def voice_command(event: dict) -> dict:
 
         return json_response(200, local)
 
-    # Local parse missed — send to Claude for NLU
     item_context = ""
     if current_item:
         item_context   = f"Current checklist item: {current_item.get('description', '')}"
@@ -2988,25 +3134,9 @@ def lambda_handler(event, context):
         or path_endswith(path, "/fire-extinguisher-inspection")
     ):
         body = parse_body(event)
-
-        # FIX: Route to the update/merge path when EITHER session_id OR
-        # inspection_id is present alongside a categories list.
-        #
-        # Previously the condition was:
-        #   if session_id and categories → create_inspection_from_session_payload
-        #
-        # That caused QR / Voice / Auditor flows (which store inspection_id in
-        # InspectionStore but do not always put session_id in the payload due to
-        # the sessionCreatedByAuditorScreen guard) to fall through to
-        # create_session — creating a duplicate record every time.
-        #
-        # With inspection_id accepted as a fallback key inside
-        # create_inspection_from_session_payload, we can safely widen this
-        # condition without touching any Android code.
         has_session    = bool(str(body.get("session_id",    "")).strip())
         has_insp_id    = bool(str(body.get("inspection_id", "")).strip())
         has_categories = isinstance(body.get("categories"), list)
-
         if (has_session or has_insp_id) and has_categories:
             return create_inspection_from_session_payload(event)
         return create_session(event)

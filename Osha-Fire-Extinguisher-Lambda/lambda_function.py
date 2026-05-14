@@ -75,7 +75,9 @@ DOWNLOAD_URL_EXPIRY = int(os.getenv("DOWNLOAD_URL_EXPIRY", "3600"))
 YOLO_ENDPOINT_NAME = os.getenv("YOLO_ENDPOINT_NAME", "").strip()
 YOLO_DETECTION_CONFIDENCE_THRESHOLD = float(os.getenv("YOLO_DETECTION_CONFIDENCE_THRESHOLD", "0.10"))
 MAX_IMAGE_WIDTH = 800
+MAX_IMAGE_WIDTH_COMPONENT = 1200
 MAX_IMAGE_QUALITY = 85
+MAX_IMAGE_QUALITY_COMPONENT = 92
 YOLO_IMAGE_SIZE = 800
 IMAGE_CONFIDENCE_BLOCK_THRESHOLD = 0.35
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
@@ -220,19 +222,21 @@ CHECKLIST_VISUAL_RULES = {
         "  - Shadow inside the nozzle opening (shadow ≠ blockage)."
     ),
     "8": (
-        "ITEM 8 — PRESSURE GAUGE / NEEDLE IN GREEN ZONE:\n\n"
-        "PASS only if ALL are true:\n"
-        "1. A pressure gauge is clearly visible.\n"
-        "2. The TRUE center-attached moving needle is clearly pointing inside the GREEN zone.\n"
-        "3. The needle is NOT in the left red recharge zone.\n"
-        "4. The needle is NOT in the right red overcharge zone.\n\n"
-        "FAIL if ANY are true:\n"
-        "- The true needle is in a red zone.\n"
-        "- The needle position cannot be confidently verified.\n"
-        "- The gauge is broken, cracked, or missing.\n\n"
-        "Important:\n"
-        "- A red-dominant gauge face is normal and is NOT a fail by itself.\n"
-        "- ANTI-HALLUCINATION: The printed white '195' mark and outer printed scale lines are NOT the needle."
+        "RULE — PRESSURE GAUGE ADEQUATELY CHARGED:\n"
+        "PASS only if ALL of the following are true:\n"
+        "  1. A pressure gauge or pressure indicator is visible anywhere in the image.\n"
+        "     It does NOT need to fill the frame — a small gauge on a full extinguisher shot is fine.\n"
+        "  2. The gauge glass/face is intact and readable.\n"
+        "  3. The gauge needle is pointing within the GREEN zone.\n"
+        "     For dial gauges: needle in center band between RECHARGE (left) and OVERCHARGED (right).\n"
+        "     For window indicators: green window is illuminated.\n"
+        "     For popup pins: pin is flush with the body.\n"
+        "FAIL if:\n"
+        "  - The gauge is missing, broken, or completely unreadable.\n"
+        "  - The gauge needle points in the red RECHARGE zone (too low pressure).\n"
+        "  - The gauge needle points in the red OVERCHARGED zone (too high pressure).\n"
+        "  - The needle zone cannot be clearly determined.\n"
+        "NOTE: Judge zone by NEEDLE POSITION, not needle color. '195' printed on gauge = scale label, NOT needle."
     ),
     "9": (
         "RULE — INSTRUCTION LABEL READABLE AND FACING OUTWARD:\n"
@@ -332,51 +336,89 @@ Schema:
 
 COMPONENT_IMAGE_ANALYSIS_SYSTEM_PROMPT = """
 You are a STRICT fire extinguisher component inspector for OSHA compliance.
-You are analyzing CLOSE-UP images of specific components (pressure gauge, label, tag).
-
-GOLDEN RULE: INCONCLUSIVE = FAIL
+You are analyzing images of specific components (pressure gauge, label, tag).
 
 IMPORTANT CONTEXT:
   - For items 8–10, the full extinguisher body does NOT need to be visible.
-  - You are evaluating a SPECIFIC COMPONENT at close range.
+  - You are evaluating a SPECIFIC COMPONENT — close-up or visible on the extinguisher.
+  - A photo showing the extinguisher with the gauge visible at the top IS valid for item 8.
+  - A close-up photo of JUST the gauge, label, or tag is also perfectly valid.
 
 STEP 1 — TARGET COMPONENT VISIBILITY:
-  Confirm whether the requested target component is clearly visible.
+  Confirm whether the requested target component is clearly visible ANYWHERE in the image.
+  For a pressure gauge: if you see a circular dial (even small) on top of the extinguisher, gauge_visible = true.
+  The gauge does NOT need to fill the entire frame — it just needs to be identifiable.
 STEP 2 — CONDITION CHECK:
   Follow the strict visual rule for this checklist item EXACTLY.
-STEP 3 — CHECKS OBJECT:
-  Return the required `checks` fields per the contract.
-  Every field must be present with an explicit enum value.
-  If a field state is unclear → use "unclear" AND set pass=false.
+STEP 3 — CHECKS OBJECT (MANDATORY):
+  You MUST return the `checks` object with ALL required fields.
+  Every field MUST be present with an explicit value — never omit a field.
+  If a field state is unclear → use the "unclear" value AND set pass=false.
 
 CORE EVIDENCE POLICY:
 - Judge only what is directly visible in the image.
-- For gauges, judge only whether the needle is pointing into the green zone.
 - Do not infer compliance from dominant background colors.
 
-ITEM 8 SPECIAL RULE — PRESSURE GAUGE:
-  Identify the true needle attached to the center pivot.
-  CRITICAL: Do NOT mistake printed white outer scale lines for the moving needle.
-  needle_zone = green → PASS (if glass is intact and readable)
-  needle_zone = red_recharge or red_overcharge → FAIL
-  needle_zone = unclear → FAIL
-  Fogged, cracked, or dusty glass → FAIL
+══════════════════════════════════════════
+ITEM 8 — PRESSURE GAUGE RULES:
+══════════════════════════════════════════
+
+CORE EVIDENCE POLICY FOR GAUGES:
+- For pressure gauges: judge needle POSITION relative to zones, not needle color.
+- '195' or any number printed on the gauge face = scale label, NOT the needle.
+- If required evidence is visible and readable, evaluate it even if small or angled.
+
+NEEDLE ZONE DETERMINATION — Use all three evidence types:
+
+  Position Evidence (MOST RELIABLE):
+    Far left / near zero / near RECHARGE label → red_recharge
+    Center of scale / between labels / pointing upward → green
+    Far right / past max scale / near OVERCHARGED label → red_overcharge
+    Just past green toward high side → yellow_caution
+
+  Color Evidence (PRIMARY for green zone):
+    Needle tip ON or WITHIN green colored area → green
+    Red background at tip → red zone (use position for recharge vs overcharge)
+    White/colorless area past max scale → red_overcharge
+
+  Text Label Evidence (HIGHLY RELIABLE):
+    Tip nearest 'RECHARGE' → red_recharge
+    Tip nearest 'OVERCHARGED' → red_overcharge
+    Tip between labels / no labels near tip → likely green
+
+CRITICAL WARNINGS:
+  ⚠ Needle color does NOT determine zone — ignore needle color entirely
+  ⚠ '195' is a printed scale label, not the needle position
+  ⚠ GREEN ZONE IS AN ARC/RANGE — any position within it = green = PASS
+  ⚠ Use "unclear" ONLY when all 3 evidence types are genuinely ambiguous
+
+══════════════════════════════════════════
 
 ITEM 10 SPECIAL RULE — INSPECTION TAG:
   If a tag is visible and you can confirm a PUNCH HOLE or MARK on ANY RECENT YEAR (2025+), PASS it.
   Do NOT fail if a year is skipped or future years are blank.
 
 Return JSON ONLY. No markdown. No extra text.
+
+For ITEM 8, your checks object MUST include ALL of these fields:
+  {"target_visible": true|false, "gauge_type": "dial|window_indicator|popup_pin|unclear", "needle_zone": "green|yellow_caution|red_recharge|red_overcharge|unclear", "gauge_face_readability": "readable|unreadable|unclear", "gauge_glass_condition": "intact|cracked|missing|unclear"}
+
+For ITEM 9, your checks object MUST include ALL of these fields:
+  {"label_visible": true|false, "label_facing_outward": true|false, "label_readable": true|false, "label_clean": true|false, "label_intact": true|false, "label_attached": true|false}
+
+For ITEM 10, your checks object MUST include ALL of these fields:
+  {"tag_visible": true|false, "tag_attached": true|false, "tag_legible": true|false, "tag_clean": true|false, "tag_intact": true|false, "recent_date_or_mark_present": true|false}
+
 Schema:
 {
   "object_detected": "target_component|other|unclear",
   "condition_checked": "<short string>",
   "pass": true|false,
   "confidence": <float 0.0–1.0>,
-  "reason": "<detailed sentence>",
+  "reason": "<detailed sentence describing what you see — mention the needle position and the zone it points to>",
   "worker_message": "<under 15 words>",
   "suggested_action": "<corrective action or null>",
-  "checks": { "<item_specific_fields>": "<enum_value>" }
+  "checks": { ... all required fields for this item ... }
 }
 """
 
@@ -678,10 +720,11 @@ def component_check_contract(item_id: str) -> Optional[dict]:
         "8": {
             "target": "pressure_gauge",
             "checks_schema": {
-                "gauge_visible": "true|false",
-                "needle_zone": "green|red_recharge|red_overcharge|unclear",
-                "gauge_glass_condition": "intact|cracked|fogged|unclear",
-                "gauge_readable": "true|false"
+                "target_visible": "true|false",
+                "gauge_type": "dial|window_indicator|popup_pin|unclear",
+                "needle_zone": "green|yellow_caution|red_recharge|red_overcharge|unclear",
+                "gauge_face_readability": "readable|unreadable|unclear",
+                "gauge_glass_condition": "intact|cracked|missing|unclear"
             }
         },
         "9": {
@@ -711,51 +754,176 @@ def component_check_contract(item_id: str) -> Optional[dict]:
 
 
 def enforce_component_checks(item_id, analysis, passed, condition_checked, reason, worker_message, suggested_action):
-    """Post-Claude enforcement for component items 8-10. Catches hallucinated passes."""
+    """Post-Claude enforcement for component items 8-10. Catches hallucinated passes.
+
+    Key principle: Only OVERRIDE Claude's pass=true when checks EXPLICITLY
+    contradict it (e.g. gauge_visible=false). If checks fields are MISSING
+    (None), trust Claude's top-level verdict — don't auto-fail for missing data.
+    """
     checks = analysis.get("checks", {})
-    if not isinstance(checks, dict):
+    if not isinstance(checks, dict) or not checks:
+        # No checks data at all — trust Claude's top-level pass/fail verdict
+        logger.info(f"Item {item_id}: No checks data returned by Claude. Trusting top-level pass={passed}")
         return passed, condition_checked, reason, worker_message, suggested_action
 
     sid = str(item_id)
 
     def _bool(key):
+        """Parse a checks field as boolean. Returns True, False, or None (missing/unclear)."""
         v = checks.get(key)
-        if isinstance(v, bool): return v
+        if v is None:
+            return None  # field not present
+        if isinstance(v, bool):
+            return v
         t = str(v).strip().lower()
-        if t in ("true", "yes"): return True
-        if t in ("false", "no"): return False
-        return None
+        if t in ("true", "yes"):
+            return True
+        if t in ("false", "no"):
+            return False
+        return None  # unclear or unexpected value
 
     if sid == "8":
-        if _bool("gauge_visible") is not True:
-            return False, "gauge_not_visible", "Gauge not visible.", "Move closer to the gauge.", "Retake showing gauge dial."
-        nz = str(checks.get("needle_zone", "unclear")).strip().lower()
-        if nz != "green":
-            return False, f"needle_{nz}", f"Needle in {nz} zone.", f"Gauge shows {nz}.", suggested_action
-        gc = str(checks.get("gauge_glass_condition", "unclear")).strip().lower()
-        if gc not in ("intact", ""):
-            return False, f"glass_{gc}", f"Gauge glass is {gc}.", f"Glass is {gc}.", suggested_action
+        # ── Self-correction: target_visible ──
+        target_visible = _bool("target_visible")
+        # Also check legacy field name
+        if target_visible is None:
+            target_visible = _bool("gauge_visible")
+
+        needle_zone = str(checks.get("needle_zone", "unclear")).strip().lower().replace(" ", "_")
+        gauge_face_readability = str(checks.get("gauge_face_readability", "unclear")).strip().lower()
+        gauge_glass_condition = str(checks.get("gauge_glass_condition", "unclear")).strip().lower()
+        gauge_type = str(checks.get("gauge_type", "unclear")).strip().lower().replace(" ", "_")
+
+        # Self-correction layer 1: needle_zone has a real value → gauge was evaluated
+        if target_visible is not True and needle_zone in (
+            "green", "yellow_caution", "red_recharge", "red_overcharge"
+        ):
+            logger.warning(f"[ITEM8] target_visible=false but needle_zone={needle_zone} — correcting target_visible=true.")
+            checks["target_visible"] = True
+            target_visible = True
+
+        # Self-correction layer 2: known gauge_type identified
+        KNOWN_GAUGE_TYPES = {"dial", "window_indicator", "popup_pin",
+                             "full_circle_needle", "semicircular_bottom_pivot",
+                             "red_face_recharge_dial", "fireboss_window", "other_indicator",
+                             "needle_dial"}
+        if target_visible is not True and gauge_type in KNOWN_GAUGE_TYPES:
+            logger.warning(f"[ITEM8] target_visible=false but gauge_type={gauge_type} — correcting target_visible=true.")
+            checks["target_visible"] = True
+            target_visible = True
+
+        # Self-correction layer 3: face is readable
+        if target_visible is not True and gauge_face_readability == "readable":
+            logger.warning(f"[ITEM8] target_visible=false but gauge_face_readability=readable — correcting target_visible=true.")
+            checks["target_visible"] = True
+            target_visible = True
+
+        # Self-correction layer 4: confidence > 0 means Claude saw something
+        confidence_val = float(analysis.get("confidence", 0.0) or 0.0)
+        if target_visible is not True and confidence_val > 0.0:
+            logger.warning(f"[ITEM8] target_visible=false but confidence={confidence_val:.2f} > 0 — correcting target_visible=true.")
+            checks["target_visible"] = True
+            target_visible = True
+
+        # Hard gate: only fires if gauge truly not visible
+        if target_visible is not True:
+            return False, "target_not_visible", reason or "No pressure gauge visible.", "Zoom in on the pressure gauge.", "Retake close-up image with gauge fully visible."
+
+        # ── Zone resolution from reason text signals ──
+        reason_lower = str(reason or "").lower()
+        overcharge_signals = ["overcharg", "past max", "far right", "beyond max", "right side", "too high", "past green", "beyond green"]
+        recharge_signals = ["recharge", "far left", "near zero", "low pressure", "left side", "too low"]
+        green_signals = ["green zone", "green area", "green arc", "green background", "center zone", "middle",
+                         "normal range", "between recharge", "between the labels", "straight up", "upward",
+                         "center band", "center top", "center of scale", "within the green"]
+
+        if needle_zone == "unclear" and reason_lower:
+            if any(s in reason_lower for s in green_signals):
+                logger.warning(f"[ITEM8] Resolving unclear → green from reason text")
+                needle_zone = "green"
+            elif any(s in reason_lower for s in recharge_signals):
+                logger.warning(f"[ITEM8] Resolving unclear → red_recharge from reason text")
+                needle_zone = "red_recharge"
+            elif any(s in reason_lower for s in overcharge_signals):
+                logger.warning(f"[ITEM8] Resolving unclear → red_overcharge from reason text")
+                needle_zone = "red_overcharge"
+
+        # Correct red_recharge when all evidence in reason points to green
+        if (
+            needle_zone == "red_recharge"
+            and gauge_type in ("dial", "red_face_recharge_dial", "full_circle_needle", "needle_dial", "semicircular_bottom_pivot")
+            and not any(s in reason_lower for s in recharge_signals)
+            and not any(s in reason_lower for s in overcharge_signals)
+            and any(s in reason_lower for s in green_signals)
+        ):
+            logger.warning(f"[ITEM8] Correcting red_recharge → green. No recharge signals, green signals present in reason.")
+            needle_zone = "green"
+
+        # ── Evaluate fail conditions ──
+        fail_conditions = []
+        if needle_zone != "green":
+            if needle_zone in ("red_recharge", "red_left"):
+                fail_conditions.append("pressure too LOW — recharge needed")
+            elif needle_zone in ("red_overcharge", "red_right"):
+                fail_conditions.append("pressure too HIGH — overcharged")
+            elif needle_zone in ("yellow_caution", "yellow", "orange"):
+                fail_conditions.append("pressure in CAUTION zone — marginal, service soon")
+            else:
+                fail_conditions.append(f"pressure zone '{needle_zone}' not confirmed adequate")
+
+        if gauge_face_readability not in ("readable", ""):
+            fail_conditions.append(f"gauge readability={gauge_face_readability}")
+        if gauge_glass_condition not in ("intact", ""):
+            fail_conditions.append(f"gauge glass={gauge_glass_condition}")
+
+        if fail_conditions:
+            detail = "; ".join(fail_conditions)
+            if "LOW" in detail or "recharge" in detail.lower():
+                msg = "Pressure too low. Remove from service immediately."
+                action = "Extinguisher needs recharging — remove from service and replace."
+            elif "HIGH" in detail or "overcharg" in detail.lower():
+                msg = "Pressure too high. Remove from service for inspection."
+                action = "Extinguisher is overcharged — remove from service and inspect."
+            elif "CAUTION" in detail or "marginal" in detail:
+                msg = "Pressure marginal. Schedule servicing soon."
+                action = "Pressure in caution zone — schedule servicing."
+            elif "glass" in detail or "readability" in detail:
+                msg = "Gauge is damaged or unreadable. Service the extinguisher."
+                action = "Gauge damaged or unreadable — needs servicing."
+            else:
+                msg = "Gauge unreadable. Retake a clearer close-up."
+                action = "Retake clear close-up of gauge with full face and needle visible."
+            return False, "gauge_failed", reason or f"Pressure gauge failed: {detail}.", msg, action
+
+        analysis["pass"] = True
+        return True, condition_checked or "gauge_pressure_adequate", reason, worker_message, suggested_action
 
     elif sid == "9":
-        if _bool("label_visible") is not True:
+        lv = _bool("label_visible")
+        if lv is False:
             return False, "label_not_visible", "Label not visible.", "Show the instruction label.", "Retake showing label."
-        if _bool("label_facing_outward") is not True:
+        if lv is None and not passed:
+            return False, "label_not_visible", "Label not visible.", "Show the instruction label.", "Retake showing label."
+        if _bool("label_facing_outward") is False:
             return False, "label_not_outward", "Label not facing outward.", "Rotate extinguisher so label faces camera.", suggested_action
-        if _bool("label_readable") is not True:
+        if _bool("label_readable") is False:
             return False, "label_not_readable", "Label not readable.", "Move closer to read label.", suggested_action
-        if _bool("label_clean") is not True:
+        if _bool("label_clean") is False:
             return False, "label_dirty", "Label is dirty/dusty.", "Clean the label and retake.", suggested_action
-        if _bool("label_intact") is not True:
+        if _bool("label_intact") is False:
             return False, "label_damaged", "Label is damaged.", "Label needs replacement.", suggested_action
 
     elif sid == "10":
-        if _bool("tag_visible") is not True:
+        tv = _bool("tag_visible")
+        if tv is False:
             return False, "tag_not_visible", "Tag not visible.", "Show the inspection tag.", "Retake showing tag."
-        if _bool("tag_attached") is not True:
+        if tv is None and not passed:
+            return False, "tag_not_visible", "Tag not visible.", "Show the inspection tag.", "Retake showing tag."
+        if _bool("tag_attached") is False:
             return False, "tag_detached", "Tag not attached.", "Reattach tag.", suggested_action
-        if _bool("tag_legible") is not True:
+        if _bool("tag_legible") is False:
             return False, "tag_illegible", "Tag not legible.", "Replace tag.", suggested_action
-        if _bool("recent_date_or_mark_present") is not True:
+        if _bool("recent_date_or_mark_present") is False:
             return False, "no_recent_date", "No recent date/mark.", "Update tag with current date.", suggested_action
 
     return passed, condition_checked, reason, worker_message, suggested_action
@@ -1635,16 +1803,28 @@ def analyze_item_image(event, _is_async=False):
     if raw_bytes is None:
         return build_response(400, {"error": "Provide image_base64 or file_key"})
 
+    # ── Determine if this is a component item (8-10) early for resolution selection ──
+    contract = component_check_contract(item_id)
+    is_component = contract is not None
+
     # ── Parallel prep: resize + YOLO (dormant) ──
+    # Use higher resolution for component items (8-10) to preserve gauge/label detail
+    if is_component:
+        img_max_width = MAX_IMAGE_WIDTH_COMPONENT
+        img_quality = MAX_IMAGE_QUALITY_COMPONENT
+    else:
+        img_max_width = MAX_IMAGE_WIDTH
+        img_quality = MAX_IMAGE_QUALITY
+
     opt_bytes = None
     yolo_dets = []
     try:
-        f_img = _THREAD_POOL.submit(prepare_image_bytes, raw_bytes)
+        f_img = _THREAD_POOL.submit(prepare_image_bytes, raw_bytes, img_max_width, img_quality)
         f_yolo = _THREAD_POOL.submit(invoke_yolo_endpoint, raw_bytes) if YOLO_ENDPOINT_NAME else None
         opt_bytes = f_img.result()
         if f_yolo: yolo_dets = f_yolo.result()
     except Exception:
-        opt_bytes = prepare_image_bytes(raw_bytes)
+        opt_bytes = prepare_image_bytes(raw_bytes, img_max_width, img_quality)
 
     # ── YOLO gate (dormant) ──
     req_class = required_yolo_class_for_item(item_id)
@@ -1656,8 +1836,7 @@ def analyze_item_image(event, _is_async=False):
             yolo_blocked = True
 
     # ── Build prompt ──
-    contract = component_check_contract(item_id)
-    is_component = contract is not None
+    # contract and is_component already set above for resolution selection
     visual_rule = checklist_rule_for_item(item_id)
     kw = ", ".join(expected_keywords_for_item(item_id))
 
@@ -1678,18 +1857,20 @@ def analyze_item_image(event, _is_async=False):
     inference_time = 0.0
     analysis = {}
     claude_error = None
+    # Component items need more tokens for detailed checks JSON
+    analysis_max_tokens = 400 if is_component else 220
 
     if not yolo_blocked:
         try:
             t0 = time.time()
-            analysis = invoke_claude_json(sys_prompt, prompt, opt_bytes, media_type)
+            analysis = invoke_claude_json(sys_prompt, prompt, opt_bytes, media_type, max_tokens=analysis_max_tokens)
             inference_time = round(time.time() - t0, 2)
             logger.info(f"Sonnet inference {item_id}: {inference_time}s")
         except ClientError as e:
             if e.response["Error"]["Code"] == "ThrottlingException":
                 time.sleep(2)
                 try:
-                    analysis = invoke_claude_json(sys_prompt, prompt, opt_bytes, media_type)
+                    analysis = invoke_claude_json(sys_prompt, prompt, opt_bytes, media_type, max_tokens=analysis_max_tokens)
                 except Exception as e2:
                     claude_error = str(e2)
             else:
@@ -1719,7 +1900,8 @@ def analyze_item_image(event, _is_async=False):
         blocked = confidence < IMAGE_CONFIDENCE_BLOCK_THRESHOLD
         if not is_component and passed and object_detected not in ("fire_extinguisher", "extinguisher"):
             passed, reason = False, "Primary object not detected as fire extinguisher."
-        if is_component and analysis.get("checks") and passed and not blocked:
+        if is_component and not blocked:
+            # Run enforcement even if checks is empty — the function handles missing checks gracefully
             passed, condition_checked, reason, worker_message, sugg_action = enforce_component_checks(
                 item_id, analysis, passed, condition_checked, reason, worker_message, sugg_action)
 

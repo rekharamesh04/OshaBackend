@@ -1,6 +1,6 @@
 """
 OSHA Inspection Checklist - Lambda Handler
-Single Lambda function handling all 8 API routes:
+Single Lambda function handling 7 API routes:
   POST /inspection-session          → Create a new inspection session (general info)
   POST /inspection                  → Submit checklist (linked to session)
   GET  /inspections                 → List all inspections (summary)
@@ -8,7 +8,6 @@ Single Lambda function handling all 8 API routes:
   GET  /inspection/checklist        → Get checklist template
   GET  /evidence/upload-url         → Generate pre-signed S3 URL for uploading evidence
   GET  /evidence/download-url       → Generate pre-signed S3 URL for downloading/viewing evidence
-  GET  /admin/inspections           → Admin dashboard: unified list across all inspection types
 """
 
 import json
@@ -23,11 +22,6 @@ dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("osha-inspections")
 sessions_table = dynamodb.Table("osha-inspection-sessions")
 
-# Additional tables for admin dashboard (cross-inspection queries)
-eyewash_table = dynamodb.Table("osha-eyewash-inspections")
-fire_ext_table = dynamodb.Table("osha-fire-extinguisher-inspections")
-racking_table = dynamodb.Table("osha-racking-inspections")
-hra_table = dynamodb.Table("osha-hra-inspections")
 
 # Initialize S3 client for evidence uploads
 s3_client = boto3.client("s3")
@@ -154,7 +148,7 @@ def build_response(status_code, body):
         "headers": {
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type",
         },
         "body": json.dumps(body, default=str),
@@ -256,17 +250,6 @@ def count_evidence(categories):
     return count
 
 
-# ─────────────────────────────────────────────
-# Helper: Scan a DynamoDB table with full pagination
-# ─────────────────────────────────────────────
-def scan_full_table(ddb_table):
-    """Scans a DynamoDB table and handles pagination to return all items."""
-    result = ddb_table.scan()
-    items = result.get("Items", [])
-    while "LastEvaluatedKey" in result:
-        result = ddb_table.scan(ExclusiveStartKey=result["LastEvaluatedKey"])
-        items.extend(result.get("Items", []))
-    return items
 
 
 # ─────────────────────────────────────────────
@@ -673,265 +656,6 @@ def generate_download_url(event):
 
 
 # ─────────────────────────────────────────────
-# API 8: PATCH /inspection/{id} — Update an Existing Inspection
-# ─────────────────────────────────────────────
-def update_inspection(event):
-    """
-    Updates an existing OSHA inspection record (partial update / upsert of fields).
-    Allows the mobile app to save progress, correct answers, add findings,
-    attach evidence, or update notes after the initial submission.
-
-    URL param:
-        inspection_id  — UUID of the inspection to update
-
-    Accepts any subset of the original POST /inspection body:
-    {
-        "categories":       [ ... ]    // optional — merged with existing data
-        "general_results": [ ... ]    // optional — replaces existing list if provided
-        "notes":            "string"  // optional — replaces existing notes if provided
-    }
-    """
-    path_params   = event.get("pathParameters", {}) or {}
-    inspection_id = path_params.get("inspection_id", "")
-
-    if not inspection_id:
-        return build_response(400, {"error": "inspection_id is required in the URL path"})
-
-    # Load the existing inspection
-    result = table.get_item(Key={"inspection_id": inspection_id})
-    existing = result.get("Item")
-    if not existing:
-        return build_response(404, {"error": "Inspection not found"})
-
-    try:
-        body = json.loads(event.get("body", "{}") or "{}")
-    except json.JSONDecodeError:
-        return build_response(400, {"error": "Invalid JSON in request body"})
-
-    # Merge categories if provided
-    incoming_cats = body.get("categories")
-    if incoming_cats is not None:
-        if not isinstance(incoming_cats, list):
-            return build_response(400, {"error": "categories must be a list"})
-        # Merge: update only items present in incoming list, keep rest unchanged
-        existing_cats = existing.get("categories", [])
-        existing_by_id = {str(c.get("id")): c for c in existing_cats if isinstance(c, dict)}
-        for inc_cat in incoming_cats:
-            if not isinstance(inc_cat, dict):
-                continue
-            cat_id = str(inc_cat.get("id", ""))
-            exist_cat = existing_by_id.get(cat_id)
-            if exist_cat is None:
-                existing_cats.append(inc_cat)
-                continue
-            # Merge items
-            exist_items_by_id = {str(i.get("id")): i for i in exist_cat.get("items", []) if isinstance(i, dict)}
-            for inc_item in inc_cat.get("items", []):
-                if not isinstance(inc_item, dict):
-                    continue
-                item_id_key = str(inc_item.get("id", ""))
-                if item_id_key in exist_items_by_id:
-                    exist_items_by_id[item_id_key].update(
-                        {k: v for k, v in inc_item.items() if v != "" or k == "answer"}
-                    )
-                else:
-                    exist_cat["items"].append(inc_item)
-            # Merge sub_sections if present
-            for inc_sub in inc_cat.get("sub_sections", []):
-                for exist_sub in exist_cat.get("sub_sections", []):
-                    if exist_sub.get("name") == inc_sub.get("name"):
-                        exist_sub_items_by_id = {str(i.get("id")): i for i in exist_sub.get("items", []) if isinstance(i, dict)}
-                        for inc_item in inc_sub.get("items", []):
-                            if not isinstance(inc_item, dict):
-                                continue
-                            item_id_key = str(inc_item.get("id", ""))
-                            if item_id_key in exist_sub_items_by_id:
-                                exist_sub_items_by_id[item_id_key].update(
-                                    {k: v for k, v in inc_item.items() if v != "" or k == "answer"}
-                                )
-                            else:
-                                exist_sub.get("items", []).append(inc_item)
-        existing["categories"] = existing_cats
-
-    # Replace general_results if provided
-    incoming_results = body.get("general_results")
-    if incoming_results is not None:
-        if not isinstance(incoming_results, list):
-            return build_response(400, {"error": "general_results must be a list"})
-        existing["general_results"] = incoming_results
-
-    # Replace notes if provided
-    if "notes" in body:
-        notes = body.get("notes", "")
-        if not isinstance(notes, str):
-            notes = ""
-        if len(notes) > 5000:
-            return build_response(400, {"error": "notes must be under 5000 characters"})
-        existing["notes"] = notes.strip()
-
-    # Recompute status based on updated data
-    categories     = existing.get("categories", [])
-    general_results = existing.get("general_results", [])
-    existing["status"]     = compute_status(categories, general_results)
-    existing["updated_at"] = datetime.now(timezone.utc).isoformat()
-
-    table.put_item(Item=existing)
-
-    return build_response(200, {
-        "inspection_id": inspection_id,
-        "status": existing["status"],
-        "updated_at": existing["updated_at"],
-        "message": "Inspection updated successfully",
-    })
-
-
-# ─────────────────────────────────────────────
-# API 9: DELETE /inspection/{id} — Delete Inspection
-# ─────────────────────────────────────────────
-def delete_inspection(event):
-    """
-    Deletes an OSHA inspection record by inspection_id.
-    Optionally also deletes the linked session record.
-
-    URL param:
-        inspection_id  — UUID of the inspection to delete
-
-    Query params:
-        delete_session  (optional, default "false") — pass "true" to also remove the session
-    """
-    path_params   = event.get("pathParameters", {}) or {}
-    inspection_id = path_params.get("inspection_id", "")
-
-    if not inspection_id:
-        return build_response(400, {"error": "inspection_id is required in the URL path"})
-
-    # Verify the record exists before deleting
-    result = table.get_item(Key={"inspection_id": inspection_id})
-    existing = result.get("Item")
-    if not existing:
-        return build_response(404, {"error": "Inspection not found"})
-
-    session_id = existing.get("session_id", "")
-
-    # Delete the inspection
-    table.delete_item(Key={"inspection_id": inspection_id})
-
-    # Always delete the linked session unless explicitly told to keep it
-    params = event.get("queryStringParameters", {}) or {}
-    keep_session = params.get("keep_session", "false").strip().lower()
-    session_deleted = False
-    
-    if keep_session not in {"true", "1", "yes"} and session_id:
-        try:
-            sessions_table.delete_item(Key={"session_id": session_id})
-            session_deleted = True
-        except Exception as e:
-            print(f"Warning: could not delete session {session_id}: {str(e)}")
-
-    return build_response(200, {
-        "message": "Inspection deleted successfully",
-        "inspection_id": inspection_id,
-        "session_id": session_id,
-        "session_deleted": session_deleted,
-    })
-
-
-# ─────────────────────────────────────────────
-# API 10: GET /admin/inspections — Admin Dashboard
-# ─────────────────────────────────────────────
-def admin_list_inspections(event):
-    """
-    Returns a unified list of ALL inspections from all 5 types,
-    with computed status, evidence count, and aggregate stats.
-
-    Query Parameters (all optional):
-        location    — Filter by facility_area (case-insensitive)
-        start_date  — Filter inspections on or after this date (YYYY-MM-DD)
-        end_date    — Filter inspections on or before this date (YYYY-MM-DD)
-    """
-    params = event.get("queryStringParameters", {}) or {}
-    filter_location = params.get("location", "").strip()
-    filter_start = params.get("start_date", "").strip()
-    filter_end = params.get("end_date", "").strip()
-
-    # Define which tables to scan and their type labels
-    table_config = [
-        (table, "Recordkeeping"),
-        (eyewash_table, "Eyewash"),
-        (fire_ext_table, "Fire Extinguisher"),
-        (racking_table, "Racking"),
-        (hra_table, "Quarterly HRA"),
-    ]
-
-    all_inspections = []
-
-    for ddb_table, type_label in table_config:
-        try:
-            items = scan_full_table(ddb_table)
-            items = convert_decimals(items)
-            for item in items:
-                all_inspections.append({
-                    "_raw": item,  # Keep full item for status computation
-                    "type": type_label,
-                })
-        except Exception as e:
-            print(f"Error scanning table for {type_label}: {str(e)}")
-            # Continue with other tables even if one fails
-
-    # Sort by created_at (oldest first) for consistent ordering
-    all_inspections.sort(key=lambda x: x["_raw"].get("created_at", ""))
-
-    # Build the response list with computed fields
-    result_list = []
-    for item_wrapper in all_inspections:
-        raw = item_wrapper["_raw"]
-        categories = raw.get("categories", [])
-        general_results = raw.get("general_results", [])
-        date_of_audit = raw.get("date_of_audit", "")
-        facility_area = raw.get("facility_area", "")
-
-        # Apply filters
-        if filter_location and filter_location.lower() != facility_area.lower():
-            continue
-        if filter_start and date_of_audit < filter_start:
-            continue
-        if filter_end and date_of_audit > filter_end:
-            continue
-
-        status = compute_status(categories, general_results)
-        evidence = count_evidence(categories)
-
-        result_list.append({
-            "inspection_id": raw.get("inspection_id"),
-            "session_id": raw.get("session_id"),
-            "company": "Continental Battery",
-            "location": facility_area,
-            "type": item_wrapper["type"],
-            "date": date_of_audit,
-            "inspector": raw.get("auditor_name", ""),
-            "evidence_count": evidence,
-            "status": status,
-            "created_at": raw.get("created_at", ""),
-        })
-
-    # Sort by created_at (newest first) for display
-    result_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-
-    # Compute stats from the filtered list
-    stats = {
-        "total": len(result_list),
-        "completed": sum(1 for i in result_list if i["status"] == "completed"),
-        "pending": sum(1 for i in result_list if i["status"] == "pending"),
-        "overdue": sum(1 for i in result_list if i["status"] == "overdue"),
-    }
-
-    return build_response(200, {
-        "stats": stats,
-        "inspections": result_list,
-    })
-
-
-# ─────────────────────────────────────────────
 # Main Handler — Routes to correct function
 # ─────────────────────────────────────────────
 def lambda_handler(event, context):
@@ -942,11 +666,11 @@ def lambda_handler(event, context):
         GET  /inspection/checklist              → get_checklist
         POST /inspection-session                → create_session
         POST /inspection                        → create_inspection
+
         GET  /inspections                       → list_inspections
         GET  /inspection/{inspection_id}        → get_inspection
         GET  /evidence/upload-url               → generate_upload_url
         GET  /evidence/download-url             → generate_download_url
-        GET  /admin/inspections                 → admin_list_inspections
         OPTIONS (any)                           → CORS preflight
     """
     http_method = event.get("httpMethod", "")
@@ -980,15 +704,6 @@ def lambda_handler(event, context):
 
     elif http_method == "GET" and resource == "/evidence/download-url":
         return generate_download_url(event)
-
-    elif http_method == "GET" and resource == "/admin/inspections":
-        return admin_list_inspections(event)
-
-    elif http_method == "PATCH" and resource == "/inspection/{inspection_id}":
-        return update_inspection(event)
-
-    elif http_method == "DELETE" and resource == "/inspection/{inspection_id}":
-        return delete_inspection(event)
 
     else:
         return build_response(404, {"error": f"Route not found: {http_method} {resource}"})
