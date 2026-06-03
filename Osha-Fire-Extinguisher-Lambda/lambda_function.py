@@ -2,17 +2,20 @@
 Fire Extinguisher Monthly Inspection - Lambda Handler
 Single Lambda function handling all API routes:
 
-  --- CRUD (4) ---
-  POST /fire-extinguisher-inspection                          → Create new inspection
-  GET  /fire-extinguisher-inspections                         → List all inspections
-  GET  /fire-extinguisher-inspection/{id}                     → Get full inspection by ID
-  GET  /fire-extinguisher-inspection/checklist                → Get checklist template
+  --- CRUD (5) ---
+  POST   /fire-extinguisher-inspection                          → Create new inspection
+  GET    /fire-extinguisher-inspections                         → List all inspections
+  GET    /fire-extinguisher-inspection/{id}                     → Get full inspection by ID
+  GET    /fire-extinguisher-inspection/checklist                → Get checklist template
+  DELETE /fire-extinguisher-inspection/{id}                     → Delete inspection by ID
 
   --- Mobile + AI Endpoints ---
   PATCH /fire-extinguisher/session/{id}/items/{item_id}       → Update single checklist item
   PATCH /fire-extinguisher/session/{id}/items/{item_id}/note  → Add note to a checklist item
   GET   /fire-extinguisher/session/{id}/report                → Slimmed inspection report
   DELETE /fire-extinguisher/session/{session_id}              → Delete session + inspection
+  POST  /fire-extinguisher/session/{id}/pause                 → Pause an inspection session
+  GET   /fire-extinguisher/session/{id}/resume                → Resume a paused session
   POST  /fire-extinguisher/voice                              → Voice command parser
   POST  /fire-extinguisher/analyze                            → AI image analysis (Claude via Bedrock)
   GET   /fire-extinguisher/analyze/status/{job_id}            → Poll async analysis job
@@ -2646,7 +2649,63 @@ def get_inspection_report(event):
 
 
 # ═══════════════════════════════════════════════════════════════
-# API 10: DELETE /fire-extinguisher/session/{session_id}
+# API 10a: DELETE /fire-extinguisher-inspection/{inspection_id}
+# ═══════════════════════════════════════════════════════════════
+def delete_inspection(event):
+    """
+    Deletes a fire extinguisher inspection record by inspection_id.
+    Also deletes the associated session record from the sessions table.
+
+    Path parameter:
+        inspection_id (required) — The inspection ID to delete
+
+    Query parameter:
+        delete_session (optional, default true) — Also delete the linked session
+    """
+    path_params = event.get("pathParameters", {}) or {}
+    inspection_id = str(path_params.get("inspection_id", "")).strip()
+
+    if not inspection_id:
+        return build_response(400, {"error": "inspection_id is required in the URL path"})
+
+    # Fetch the inspection to verify it exists and get session_id
+    result = table.get_item(Key={"inspection_id": inspection_id})
+    item = result.get("Item")
+
+    if not item:
+        return build_response(404, {"error": "Inspection not found"})
+
+    session_id = str(item.get("session_id", "")).strip()
+
+    # Delete the inspection
+    try:
+        table.delete_item(Key={"inspection_id": inspection_id})
+    except Exception as e:
+        logger.exception("Error deleting inspection")
+        return build_response(500, {"error": f"Failed to delete inspection: {str(e)}"})
+
+    # Optionally delete the linked session
+    delete_session_flag = str(
+        (event.get("queryStringParameters") or {}).get("delete_session", "true")
+    ).strip().lower()
+    deleted_session = False
+    if delete_session_flag in {"1", "true", "yes", "y"} and session_id:
+        try:
+            sessions_table.delete_item(Key={"session_id": session_id})
+            deleted_session = True
+        except Exception as e:
+            logger.warning(f"Warning: Failed to delete linked session {session_id}: {e}")
+
+    return build_response(200, {
+        "message": "Inspection deleted successfully",
+        "inspection_id": inspection_id,
+        "session_id": session_id,
+        "session_deleted": deleted_session,
+    })
+
+
+# ═══════════════════════════════════════════════════════════════
+# API 10b: DELETE /fire-extinguisher/session/{session_id}
 # ═══════════════════════════════════════════════════════════════
 def delete_session(event):
     path_params = event.get("pathParameters", {}) or {}
@@ -3258,6 +3317,46 @@ def analyze_item_image(event, _is_async=False):
                     logger.info(f"[DEBUG_AI] analysis present for item={item_id} (unable to JSON-dump)")
         except Exception:
             logger.exception("Failed to process DEBUG_CAPTURE_ANALYSIS")
+        # --- Blur/clarity guard for component items (7-10) ---
+        try:
+            if str(item_id) in {"7", "8", "9", "10"} and isinstance(bedrock_image_bytes, (bytes, bytearray)):
+                try:
+                    img = Image.open(io.BytesIO(bedrock_image_bytes)).convert("L")
+                    img = img.resize((300, 300))
+                    edges = img.filter(ImageFilter.FIND_EDGES)
+                    pixels = list(edges.getdata())
+                    if pixels:
+                        mean = sum(pixels) / len(pixels)
+                        var = sum((p - mean) ** 2 for p in pixels) / len(pixels)
+                    else:
+                        var = 0.0
+                    logger.info(f"[BLUR_CHECK] item={item_id} edge-variance={var:.2f}")
+                    BLUR_THRESHOLD = float(os.getenv("BLUR_EDGE_VARIANCE_THRESHOLD", "200.0"))
+                    if var < BLUR_THRESHOLD:
+                        checks = analysis.get("checks") if isinstance(analysis, dict) else {}
+                        checks = checks if isinstance(checks, dict) else {}
+                        if str(item_id) == "8":
+                            if checks.get("gauge_face_readability") != "readable":
+                                checks["gauge_face_readability"] = "unreadable"
+                                logger.info(f"[BLUR_CHECK] Marked gauge_face_readability=unreadable for item {item_id}")
+                        elif str(item_id) == "7":
+                            if checks.get("nozzle_tip_visible") is not False:
+                                checks["nozzle_tip_visible"] = False
+                                logger.info(f"[BLUR_CHECK] Marked nozzle_tip_visible=false for item {item_id}")
+                        elif str(item_id) == "9":
+                            if checks.get("label_text_readability") != "blurry":
+                                checks["label_text_readability"] = "blurry"
+                                logger.info(f"[BLUR_CHECK] Marked label_text_readability=blurry for item {item_id}")
+                        elif str(item_id) == "10":
+                            if checks.get("recent_year_visible") != "no":
+                                checks["recent_year_visible"] = "no"
+                                checks["year_identified"] = "unclear"
+                                logger.info(f"[BLUR_CHECK] Marked recent_year_visible=no for item {item_id}")
+                        analysis["checks"] = checks
+                except Exception:
+                    logger.exception("Failed to compute blur metric")
+        except Exception:
+            logger.exception("Unexpected error in blur-check wrapper")
     except Exception as e:
         logger.exception("Bedrock analysis failed")
         return build_response(502, {"error": f"Bedrock failed: {str(e)}"})
@@ -3566,6 +3665,152 @@ def analyze_item_image(event, _is_async=False):
 
 
 # ═══════════════════════════════════════════════════════════════
+# PAUSE / RESUME SESSION
+# ═══════════════════════════════════════════════════════════════
+
+def compute_progress(inspection):
+    """Compute inspection progress, skipping auto-calculated items 11 & 12."""
+    total = 0
+    answered = 0
+    for cat in inspection.get("categories", []):
+        for item in cat.get("items", []):
+            iid = int(item.get("id", 0))
+            if iid in (11, 12):
+                continue
+            total += 1
+            if item.get("answer", "").strip():
+                answered += 1
+    percentage = round((answered / total * 100), 1) if total else 0
+    return {"total": total, "answered": answered, "percentage": percentage}
+
+
+def find_next_unanswered(inspection):
+    """Return the item ID of the next unanswered checklist item, skipping 11 & 12."""
+    for cat in inspection.get("categories", []):
+        for item in cat.get("items", []):
+            iid = int(item.get("id", 0))
+            if iid in (11, 12):
+                continue
+            if not item.get("answer", "").strip():
+                return iid
+    return None
+
+
+def pause_session(event):
+    """POST handler — pause an in-progress inspection session."""
+    try:
+        session_id = (event.get("pathParameters") or {}).get("session_id", "")
+        if not session_id:
+            return build_response(400, {"error": "Missing session_id"})
+
+        inspection = load_inspection_by_any_id(session_id)
+        if not inspection:
+            return build_response(404, {"error": f"Inspection not found for session {session_id}"})
+
+        # ── Merge any partial data submitted with the pause request ──
+        body = {}
+        raw = event.get("body", "")
+        if raw:
+            try:
+                body = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                body = {}
+
+        if body.get("categories"):
+            inspection["categories"] = merge_categories(
+                inspection.get("categories", []), body["categories"]
+            )
+        if "general_results" in body:
+            inspection["general_results"] = body["general_results"]
+        if "notes" in body:
+            inspection["notes"] = body["notes"]
+
+        # ── Compute progress ─────────────────────────────────────────
+        progress = compute_progress(inspection)
+
+        # ── Update inspection record ─────────────────────────────────
+        ts = now_iso()
+        inspection["status"] = "paused"
+        inspection["last_paused_at"] = ts
+        inspection["updated_at"] = ts
+        save_inspection(sanitize_for_dynamodb(inspection))
+
+        # ── Update session table ─────────────────────────────────────
+        try:
+            sessions_table.update_item(
+                Key={"session_id": inspection.get("session_id", session_id)},
+                UpdateExpression="SET #status = :status, progress = :progress, inspection_type = :itype, updated_at = :updated_at, last_paused_at = :paused_at",
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":status": "paused",
+                    ":progress": sanitize_for_dynamodb(progress),
+                    ":itype": "fire-extinguisher",
+                    ":updated_at": now_iso(),
+                    ":paused_at": now_iso(),
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update session table: {e}")
+
+        return build_response(200, {
+            "session_id": inspection.get("session_id", session_id),
+            "inspection_id": inspection.get("inspection_id"),
+            "status": "paused",
+            "progress": progress,
+            "last_paused_at": ts,
+        })
+    except Exception:
+        logger.exception("pause_session failed")
+        return build_response(500, {"error": "Internal error while pausing session"})
+
+
+def resume_session(event):
+    """GET handler — resume a paused inspection session."""
+    try:
+        session_id = (event.get("pathParameters") or {}).get("session_id", "")
+        if not session_id:
+            return build_response(400, {"error": "Missing session_id"})
+
+        inspection = load_inspection_by_any_id(session_id)
+        if not inspection:
+            return build_response(404, {"error": f"Inspection not found for session {session_id}"})
+
+        # ── Compute progress & next item ─────────────────────────────
+        progress = compute_progress(inspection)
+        next_item_id = find_next_unanswered(inspection)
+
+        # ── Update inspection record ─────────────────────────────────
+        ts = now_iso()
+        inspection["status"] = "in_progress"
+        inspection["resumed_at"] = ts
+        inspection["updated_at"] = ts
+        save_inspection(sanitize_for_dynamodb(inspection))
+
+        # ── Update session table ─────────────────────────────────────
+        try:
+            sessions_table.update_item(
+                Key={"session_id": inspection.get("session_id", session_id)},
+                UpdateExpression="SET #status = :status, updated_at = :updated_at, resumed_at = :resumed_at",
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":status": "in_progress",
+                    ":updated_at": now_iso(),
+                    ":resumed_at": now_iso(),
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update session table: {e}")
+
+        result = dict(inspection)
+        result["progress"] = progress
+        result["next_unanswered_item_id"] = next_item_id
+        return build_response(200, result)
+    except Exception:
+        logger.exception("resume_session failed")
+        return build_response(500, {"error": "Internal error while resuming session"})
+
+
+# ═══════════════════════════════════════════════════════════════
 # LAMBDA HANDLER — Main Router
 # ═══════════════════════════════════════════════════════════════
 def lambda_handler(event, context):
@@ -3597,6 +3842,10 @@ def lambda_handler(event, context):
 
     if http_method == "GET" and resource == "/fire-extinguisher-inspection/{inspection_id}":
         return get_inspection(event)
+
+    # ── Delete inspection by ID (CRUD) ────────────────────────────────────
+    if http_method == "DELETE" and resource == "/fire-extinguisher-inspection/{inspection_id}":
+        return delete_inspection(event)
 
     # ── PATCH item ────────────────────────────────────────────────────────
     if http_method == "PATCH" and "/items/" in path and "/note" not in path:
@@ -3651,6 +3900,30 @@ def lambda_handler(event, context):
             return delete_session(event)
         except (ValueError, IndexError):
             return build_response(400, {"error": "Invalid delete path"})
+
+    # ── Pause session ─────────────────────────────────────────────────────
+    if http_method == "POST" and "/pause" in path and "/session/" in path:
+        parts = path.rstrip("/").split("/")
+        try:
+            session_idx = parts.index("session")
+            session_id = parts[session_idx + 1]
+            event.setdefault("pathParameters", {})
+            event["pathParameters"]["session_id"] = session_id
+            return pause_session(event)
+        except (ValueError, IndexError):
+            return build_response(400, {"error": "Invalid pause path"})
+
+    # ── Resume session ────────────────────────────────────────────────────
+    if http_method == "GET" and "/resume" in path and "/session/" in path:
+        parts = path.rstrip("/").split("/")
+        try:
+            session_idx = parts.index("session")
+            session_id = parts[session_idx + 1]
+            event.setdefault("pathParameters", {})
+            event["pathParameters"]["session_id"] = session_id
+            return resume_session(event)
+        except (ValueError, IndexError):
+            return build_response(400, {"error": "Invalid resume path"})
 
     # ── Voice command ─────────────────────────────────────────────────────
     if http_method == "POST" and "voice" in path:

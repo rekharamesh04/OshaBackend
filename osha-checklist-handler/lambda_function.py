@@ -1,6 +1,6 @@
 """
 OSHA Inspection Checklist - Lambda Handler
-Single Lambda function handling 7 API routes:
+Single Lambda function handling 8 API routes:
   POST /inspection-session          → Create a new inspection session (general info)
   POST /inspection                  → Submit checklist (linked to session)
   GET  /inspections                 → List all inspections (summary)
@@ -8,11 +8,13 @@ Single Lambda function handling 7 API routes:
   GET  /inspection/checklist        → Get checklist template
   GET  /evidence/upload-url         → Generate pre-signed S3 URL for uploading evidence
   GET  /evidence/download-url       → Generate pre-signed S3 URL for downloading/viewing evidence
+  DELETE /inspection/{id}           → Delete an inspection by ID
 """
 
 import json
-import uuid
 import os
+import uuid
+
 import boto3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -21,6 +23,9 @@ from decimal import Decimal
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("osha-inspections")
 sessions_table = dynamodb.Table("osha-inspection-sessions")
+
+# API Key Authentication
+EXPECTED_API_KEY = os.getenv("API_KEY", "").strip()
 
 
 # Initialize S3 client for evidence uploads
@@ -32,12 +37,26 @@ s3_client = boto3.client("s3")
 EVIDENCE_S3_BUCKET = os.environ.get("EVIDENCE_S3_BUCKET", "osha-inspection-evidence-media")
 UPLOAD_URL_EXPIRY = 900       # 15 minutes for uploads
 DOWNLOAD_URL_EXPIRY = 3600    # 1 hour for downloads/viewing
+MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
 
 ALLOWED_CONTENT_TYPES = [
     # Images
     "image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/heif",
     # Videos
     "video/mp4", "video/quicktime", "video/x-msvideo", "video/webm", "video/3gpp",
+    # Documents
+    "application/pdf",
+    "application/msword",                                                          # .doc
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",      # .docx
+    "application/vnd.ms-excel",                                                    # .xls
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",            # .xlsx
+    "application/vnd.ms-powerpoint",                                               # .ppt
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",    # .pptx
+    "text/plain",                                                                  # .txt
+    "text/csv",                                                                    # .csv
+    "application/zip",                                                             # .zip
+    "application/x-rar-compressed",                                                # .rar
+    "application/x-7z-compressed",                                                 # .7z
 ]
 
 
@@ -141,6 +160,27 @@ OSHA_CHECKLIST = {
 # ─────────────────────────────────────────────
 # Helper: Build HTTP Response with CORS headers
 # ─────────────────────────────────────────────
+def _normalized_headers(event):
+    """Normalize header keys to lowercase for case-insensitive lookup."""
+    headers = event.get("headers") or {}
+    return {str(k).strip().lower(): ("" if v is None else str(v).strip()) for k, v in headers.items()}
+
+
+def require_api_key(event):
+    """Validate the x-api-key header or query param. Returns None if valid, or an error response."""
+    if not EXPECTED_API_KEY:
+        return build_response(500, {"error": "Server API_KEY env var is not configured"})
+    headers = _normalized_headers(event)
+    provided = (headers.get("x-api-key") or headers.get("x_api_key") or headers.get("apikey") or "").strip()
+    # Fallback: also check query string parameters (for browser URL testing)
+    if not provided:
+        qsp = event.get("queryStringParameters") or {}
+        provided = (qsp.get("x-api-key") or qsp.get("api_key") or qsp.get("apikey") or "").strip()
+    if not provided or provided != EXPECTED_API_KEY:
+        return build_response(403, {"error": "Forbidden", "message": "Invalid or missing API key"})
+    return None
+
+
 def build_response(status_code, body):
     """Builds a standardized API Gateway response with CORS headers."""
     return {
@@ -148,8 +188,8 @@ def build_response(status_code, body):
         "headers": {
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type,x-api-key",
         },
         "body": json.dumps(body, default=str),
     }
@@ -544,11 +584,12 @@ def get_inspection(event):
 def generate_upload_url(event):
     """
     Generates a pre-signed S3 URL that the mobile app can use to upload
-    an image or video directly to S3.
+    an image, video, or document directly to S3.
 
     Query Parameters:
-        filename       (required) — Original file name (e.g. "photo_001.jpg")
-        contentType    (required) — MIME type (e.g. "image/jpeg", "video/mp4")
+        filename       (required) — Original file name (e.g. "photo_001.jpg", "report.pdf")
+        contentType    (required) — MIME type (e.g. "image/jpeg", "application/pdf")
+        fileSize       (optional) — File size in bytes for server-side validation (max 25 MB)
         inspectionType (optional) — For folder organization
                                     (e.g. "fire-extinguisher", "eyewash", "racking", "hra", "osha")
 
@@ -557,12 +598,16 @@ def generate_upload_url(event):
             "upload_url": "https://s3.amazonaws.com/...",
             "file_url": "https://s3.amazonaws.com/...",
             "file_key": "evidence/fire-extinguisher/...",
+            "content_type": "application/pdf",
+            "filename": "report.pdf",
+            "max_file_size_bytes": 26214400,
             "expires_in": 900
         }
     """
     params = event.get("queryStringParameters", {}) or {}
     filename = params.get("filename", "").strip()
     content_type = params.get("contentType", "").strip()
+    file_size_str = params.get("fileSize", "").strip()
     inspection_type = params.get("inspectionType", "general").strip()
 
     if not filename:
@@ -573,6 +618,20 @@ def generate_upload_url(event):
         return build_response(400, {
             "error": f"contentType '{content_type}' is not allowed. Allowed types: {', '.join(ALLOWED_CONTENT_TYPES)}"
         })
+
+    # Validate file size if provided
+    if file_size_str:
+        try:
+            file_size = int(file_size_str)
+            if file_size > MAX_FILE_SIZE_BYTES:
+                max_mb = MAX_FILE_SIZE_BYTES / (1024 * 1024)
+                return build_response(400, {
+                    "error": f"File size ({file_size} bytes) exceeds the maximum allowed size of {max_mb:.0f} MB"
+                })
+            if file_size <= 0:
+                return build_response(400, {"error": "fileSize must be a positive integer"})
+        except ValueError:
+            return build_response(400, {"error": "fileSize must be a valid integer (bytes)"})
 
     # Generate unique S3 key: evidence/<inspection_type>/<date>/<uuid>_<filename>
     date_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -600,6 +659,9 @@ def generate_upload_url(event):
         "upload_url": upload_url,
         "file_url": file_url,
         "file_key": s3_key,
+        "content_type": content_type,
+        "filename": safe_filename,
+        "max_file_size_bytes": MAX_FILE_SIZE_BYTES,
         "expires_in": UPLOAD_URL_EXPIRY,
     })
 
@@ -610,25 +672,33 @@ def generate_upload_url(event):
 def generate_download_url(event):
     """
     Generates a pre-signed S3 URL for downloading/viewing an evidence file.
+    Supports inline viewing (e.g. PDFs in browser) and forced file downloads.
 
     Query Parameters:
-        fileKey  (required) — The S3 object key (returned as file_key from upload-url)
+        fileKey   (required) — The S3 object key (returned as file_key from upload-url)
+        download  (optional) — Set to "true" to force browser download instead of inline view
 
     Returns:
         {
             "download_url": "https://s3.amazonaws.com/...",
+            "filename": "report.pdf",
+            "content_type": "application/pdf",
+            "file_size": 1048576,
             "expires_in": 3600
         }
     """
     params = event.get("queryStringParameters", {}) or {}
     file_key = params.get("fileKey", "").strip()
+    force_download = params.get("download", "false").strip().lower() in ("1", "true", "yes")
 
     if not file_key:
         return build_response(400, {"error": "fileKey query parameter is required"})
 
-    # Verify the file exists in S3
+    # Verify the file exists in S3 and get metadata
     try:
-        s3_client.head_object(Bucket=EVIDENCE_S3_BUCKET, Key=file_key)
+        head = s3_client.head_object(Bucket=EVIDENCE_S3_BUCKET, Key=file_key)
+        content_type = head.get("ContentType", "application/octet-stream")
+        file_size = head.get("ContentLength", 0)
     except Exception as e:
         error_code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
         if error_code == "404":
@@ -636,12 +706,22 @@ def generate_download_url(event):
         print(f"Error checking S3 object: {str(e)}")
         return build_response(500, {"error": "Failed to verify file existence"})
 
+    # Extract original filename from S3 key (strip the UUID prefix)
+    raw_filename = file_key.rsplit("/", 1)[-1]
+    if "_" in raw_filename:
+        filename = raw_filename.split("_", 1)[1]
+    else:
+        filename = raw_filename
+
+    # Build pre-signed URL with Content-Disposition for proper browser handling
+    disposition = "attachment" if force_download else "inline"
     try:
         download_url = s3_client.generate_presigned_url(
             "get_object",
             Params={
                 "Bucket": EVIDENCE_S3_BUCKET,
                 "Key": file_key,
+                "ResponseContentDisposition": f'{disposition}; filename="{filename}"',
             },
             ExpiresIn=DOWNLOAD_URL_EXPIRY,
         )
@@ -651,7 +731,66 @@ def generate_download_url(event):
 
     return build_response(200, {
         "download_url": download_url,
+        "filename": filename,
+        "content_type": content_type,
+        "file_size": file_size,
         "expires_in": DOWNLOAD_URL_EXPIRY,
+    })
+
+
+# ─────────────────────────────────────────────
+# API 8: DELETE /inspection/{id} — Delete Inspection
+# ─────────────────────────────────────────────
+def delete_inspection(event):
+    """
+    Deletes an inspection record by inspection_id.
+    Also deletes the associated session record from the sessions table.
+
+    Path parameter:
+        inspection_id (required) — The inspection ID to delete
+
+    Query parameter:
+        delete_session (optional, default true) — Also delete the linked session
+    """
+    path_params = event.get("pathParameters", {}) or {}
+    inspection_id = str(path_params.get("inspection_id", "")).strip()
+
+    if not inspection_id:
+        return build_response(400, {"error": "inspection_id is required in the URL path"})
+
+    # Fetch the inspection to verify it exists and get session_id
+    result = table.get_item(Key={"inspection_id": inspection_id})
+    item = result.get("Item")
+
+    if not item:
+        return build_response(404, {"error": "Inspection not found"})
+
+    session_id = str(item.get("session_id", "")).strip()
+
+    # Delete the inspection
+    try:
+        table.delete_item(Key={"inspection_id": inspection_id})
+    except Exception as e:
+        print(f"Error deleting inspection: {str(e)}")
+        return build_response(500, {"error": f"Failed to delete inspection: {str(e)}"})
+
+    # Optionally delete the linked session
+    delete_session_flag = str(
+        (event.get("queryStringParameters") or {}).get("delete_session", "true")
+    ).strip().lower()
+    deleted_session = False
+    if delete_session_flag in {"1", "true", "yes", "y"} and session_id:
+        try:
+            sessions_table.delete_item(Key={"session_id": session_id})
+            deleted_session = True
+        except Exception as e:
+            print(f"Warning: Failed to delete linked session {session_id}: {str(e)}")
+
+    return build_response(200, {
+        "message": "Inspection deleted successfully",
+        "inspection_id": inspection_id,
+        "session_id": session_id,
+        "session_deleted": deleted_session,
     })
 
 
@@ -669,6 +808,7 @@ def lambda_handler(event, context):
 
         GET  /inspections                       → list_inspections
         GET  /inspection/{inspection_id}        → get_inspection
+        DELETE /inspection/{inspection_id}      → delete_inspection
         GET  /evidence/upload-url               → generate_upload_url
         GET  /evidence/download-url             → generate_download_url
         OPTIONS (any)                           → CORS preflight
@@ -682,6 +822,11 @@ def lambda_handler(event, context):
     # CORS preflight
     if http_method == "OPTIONS":
         return build_response(200, {"message": "CORS preflight OK"})
+
+    # API Key validation
+    auth_error = require_api_key(event)
+    if auth_error:
+        return auth_error
 
     # Route to the correct handler
     if http_method == "GET" and resource == "/inspection/checklist":
@@ -699,6 +844,9 @@ def lambda_handler(event, context):
     elif http_method == "GET" and resource == "/inspection/{inspection_id}":
         return get_inspection(event)
 
+    elif http_method == "DELETE" and resource == "/inspection/{inspection_id}":
+        return delete_inspection(event)
+
     elif http_method == "GET" and resource == "/evidence/upload-url":
         return generate_upload_url(event)
 
@@ -707,3 +855,4 @@ def lambda_handler(event, context):
 
     else:
         return build_response(404, {"error": f"Route not found: {http_method} {resource}"})
+

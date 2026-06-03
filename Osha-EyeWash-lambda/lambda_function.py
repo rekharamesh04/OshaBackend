@@ -12,6 +12,7 @@ from typing import Any, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+import concurrent.futures
 
 try:
     from PIL import Image
@@ -32,6 +33,7 @@ UPLOAD_URL_EXPIRY     = int(os.getenv("UPLOAD_URL_EXPIRY", "900"))
 DOWNLOAD_URL_EXPIRY   = int(os.getenv("DOWNLOAD_URL_EXPIRY", "3600"))
 MAX_IMAGE_WIDTH       = 800
 MAX_IMAGE_QUALITY     = 85
+BATCH_WORKER_COUNT    = int(os.getenv("BATCH_WORKER_COUNT", "4"))
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 
@@ -409,9 +411,13 @@ FAIL if: No tag on or near bottle holder; tag blank (all fields empty); tag belo
 """,
 }
 
+# ─────────────────────────────────────────────
+# AI System Prompts (Eyewash / Emergency Shower)
+# ─────────────────────────────────────────────
 IMAGE_ANALYSIS_SYSTEM_PROMPT = """
 You are a CERTIFIED OSHA EYEWASH & EMERGENCY SHOWER SAFETY INSPECTOR with 15 years of field experience.
-Your sole job is to evaluate a single photograph against one specific ANSI Z358.1 checklist item.
+Your job is to evaluate one or more photographs (frames from video or multiple images) against one specific ANSI Z358.1 checklist item.
+Each image is analyzed independently; the system aggregates results using the best (highest confidence, most favorable) outcome.
 
 PRIME DIRECTIVE — ZERO TOLERANCE FOR AMBIGUITY:
 • INCONCLUSIVE = FAIL. Always.
@@ -463,14 +469,124 @@ Return JSON ONLY. No markdown. No extra text.
   "reason": "<2-3 sentences: exactly what you see and pixel-level evidence for pass or fail>",
   "worker_message": "<actionable instruction under 12 words>",
   "suggested_action": "<specific corrective action, or null if passed>"
-}
+You are a STRICT component-level inspector for eyewash and emergency shower images.
+You analyze specific components (nozzle caps, tags, labels, gauge-like indicators on cartridges).
+
+═══════════════════════════════════════════════════════════════
+GOLDEN RULE: INCONCLUSIVE = FAIL
+If you cannot clearly confirm a component condition is met, set pass=false.
+═══════════════════════════════════════════════════════════════
+
+CRITICAL — WHAT "target_visible=true" MEANS:
+    The component EXISTS somewhere in the image and you can describe it.
+    It does NOT need to fill the frame or be a close-up.
+
+SET target_visible=true if:
+    ✓ The component is anywhere in the image and describable (even small/angled).
+    ✓ You can identify the component (e.g., "small white nozzle cap on right head").
+
+SET target_visible=false ONLY if:
+    ✗ The component is literally not present anywhere in the image.
+
+Follow the same JSON schema as the main prompt, but include `target_visible` when relevant.
 """
 
 
-def build_item_prompt(checklist_item: dict, rule: str) -> str:
+# ── AI Enablement Policy (from Eyewash_Inspection_AI_Enablement.xlsx) ─────────
+MANUAL_ONLY_ITEMS = {"6", "16", "21", "28", "29", "36"}
+PARTIAL_AI_ITEMS  = {"7", "8", "9", "18", "20", "30"}
+
+ITEM_CONFIDENCE_LEVEL = {
+    "1": "medium", "2": "high", "3": "high", "4": "high", "5": "high",
+    "6": "n/a", "7": "medium", "8": "medium", "9": "medium", "10": "high",
+    "11": "medium", "12": "high", "13": "high", "14": "high", "15": "high",
+    "16": "n/a", "17": "high", "18": "medium", "19": "high", "20": "medium",
+    "21": "n/a", "22": "high", "23": "medium", "24": "high", "25": "high",
+    "26": "high", "27": "high", "28": "n/a", "29": "n/a", "30": "medium",
+    "31": "high", "32": "medium", "33": "high", "34": "high", "35": "high",
+    "36": "n/a", "37": "high", "38": "high",
+}
+
+ITEM_MEDIA_REQUIREMENT = {
+    "7": "clear_label_photo",
+    "8": "clear_level_and_label_photo",
+    "9": "short_video_or_two_phase_images",
+    "18": "short_video",
+    "20": "active_flow_photo_or_video",
+    "30": "short_video",
+}
+
+MANUAL_REVIEW_REASON = {
+    "7": "AI can read visible dates, but inspector must confirm replacement action and unclear labels.",
+    "8": "AI can estimate fill line and visible label details, but inspector must confirm preservative maintenance action.",
+    "9": "AI can verify visible flow and stick/date clues, but physical activation and final sign-off are manual.",
+    "18": "AI needs activation evidence and can only estimate timing; inspector must confirm one-second response and stable flow.",
+    "20": "AI can estimate stream symmetry visually, but pressure safety and final usability judgment are manual.",
+    "30": "AI needs activation evidence and can only estimate timing/combination behavior; inspector must confirm final compliance.",
+}
+
+MANUAL_ONLY_REASON = {
+    "6": "Physical wipe-down is a maintenance action and cannot be completed by AI.",
+    "16": "Physical wipe-down is a maintenance action and cannot be completed by AI.",
+    "21": "Water temperature requires a thermometer or probe and cannot be measured from images.",
+    "28": "Physical wipe-down is a maintenance action and cannot be completed by AI.",
+    "29": "Water temperature requires a thermometer or probe and cannot be measured from images.",
+    "36": "Physical wipe-down is a maintenance action and cannot be completed by AI.",
+}
+
+
+def get_item_ai_policy(item_id: str) -> dict:
+    sid = str(item_id)
+    if sid in MANUAL_ONLY_ITEMS:
+        return {
+            "mode": "manual",
+            "manual_review_required": True,
+            "confidence_level": ITEM_CONFIDENCE_LEVEL.get(sid, "n/a"),
+            "media_requirement": "manual_action",
+            "reason": MANUAL_ONLY_REASON.get(sid, "Manual inspection required."),
+        }
+    if sid in PARTIAL_AI_ITEMS:
+        return {
+            "mode": "partial",
+            "manual_review_required": True,
+            "confidence_level": ITEM_CONFIDENCE_LEVEL.get(sid, "medium"),
+            "media_requirement": ITEM_MEDIA_REQUIREMENT.get(sid, "photo"),
+            "reason": MANUAL_REVIEW_REASON.get(sid, "AI assists but manual confirmation is required."),
+        }
+    return {
+        "mode": "ai",
+        "manual_review_required": False,
+        "confidence_level": ITEM_CONFIDENCE_LEVEL.get(sid, "high"),
+        "media_requirement": "photo",
+        "reason": "Full visual AI inspection is feasible with a clear image.",
+    }
+
+
+def get_ai_enablement_matrix(event: dict) -> dict:
+    rows = []
+    for category in EYEWASH_CHECKLIST.get("categories", []):
+        for item in category.get("items", []):
+            sid = str(item.get("id", ""))
+            policy = get_item_ai_policy(sid)
+            rows.append({
+                "item_id": item.get("id"),
+                "section": category.get("name", ""),
+                "description": item.get("description", ""),
+                "ai_mode": policy["mode"],
+                "manual_review_required": policy["manual_review_required"],
+                "confidence_level": policy["confidence_level"],
+                "media_requirement": policy["media_requirement"],
+                "reason": policy["reason"],
+            })
+    return json_response(200, {"ai_enablement_matrix": rows})
+
+
+def build_item_prompt(checklist_item: dict, rule: str, policy: Optional[dict] = None) -> str:
     """Builds a structured analysis prompt for a single checklist item."""
     item_id   = checklist_item.get("id", "?")
     item_desc = checklist_item.get("description", "")
+    policy = policy or get_item_ai_policy(str(item_id))
+
     parts = [
         f"You are evaluating checklist item #{item_id} in an OSHA eyewash/emergency shower inspection.",
         "",
@@ -491,6 +607,17 @@ def build_item_prompt(checklist_item: dict, rule: str) -> str:
         "REMINDERS: INCONCLUSIVE = FAIL. Do NOT assume what is behind an obstruction. "
         "Report ONLY what you directly observe. Return JSON only.",
     ]
+
+    if policy.get("mode") == "partial":
+        parts.extend([
+            "",
+            "PARTIAL AI MODE",
+            "This item requires human confirmation even after AI analysis.",
+            f"Required evidence type: {policy.get('media_requirement', 'photo')}",
+            f"Manual checkpoint: {policy.get('reason', '')}",
+            "Evaluate only what is visually verifiable in the media.",
+        ])
+
     return "\n".join(parts)
 
 
@@ -941,6 +1068,66 @@ def list_inspections(event: dict) -> dict:
     return json_response(200, summaries)
 
 
+def get_completion_readiness(event: dict) -> dict:
+    path_params   = event.get("pathParameters") or {}
+    inspection_id = str(path_params.get("inspection_id") or "").strip()
+
+    if not inspection_id:
+        return json_response(400, {"error": "inspection_id is required"})
+
+    inspection = load_inspection_by_any_id(inspection_id)
+    if not inspection:
+        return json_response(404, {"error": "Inspection not found"})
+
+    general_info = inspection.get("general_information", {}) or {}
+    required_general_fields = ["location", "start_date", "leader"]
+    missing_general_fields = [
+        field
+        for field in required_general_fields
+        if not str(general_info.get(field, "")).strip()
+    ]
+
+    items = get_all_items(inspection)
+    missing_item_ids = []
+    blocked_item_ids = []
+    for item in items:
+        item_id = str(item.get("id", "")).strip()
+        if not item_id:
+            continue
+        if item.get("blocked_by_wrong_image"):
+            blocked_item_ids.append(item_id)
+        if not str(item.get("answer", "")).strip():
+            missing_item_ids.append(item_id)
+
+    progress = compute_progress(inspection)
+    ready_for_completion = not missing_general_fields and not missing_item_ids and not blocked_item_ids
+
+    missing_fields = []
+    if missing_general_fields:
+        missing_fields.append({"section": "general_information", "fields": missing_general_fields})
+    if missing_item_ids:
+        missing_fields.append({"section": "checklist_items", "item_ids": missing_item_ids})
+    if blocked_item_ids:
+        missing_fields.append({"section": "blocked_items", "item_ids": blocked_item_ids})
+
+    return json_response(200, {
+        "inspection_id": inspection.get("inspection_id", inspection_id),
+        "session_id": inspection.get("session_id", ""),
+        "ready_for_completion": ready_for_completion,
+        "can_submit": ready_for_completion,
+        "inspection_status": inspection.get("status", compute_status(inspection)),
+        "completion_progress": progress,
+        "missing_fields": missing_fields,
+        "missing_general_fields": missing_general_fields,
+        "missing_item_ids": missing_item_ids,
+        "blocked_item_ids": blocked_item_ids,
+        "message": (
+            "Inspection is ready for completion." if ready_for_completion
+            else "Inspection is not ready for completion. Resolve missing fields and blocked items."
+        ),
+    })
+
+
 def update_checklist_item(event: dict) -> dict:
     path_params   = event.get("pathParameters") or {}
     inspection_id = path_params.get("inspection_id") or ""
@@ -1027,6 +1214,84 @@ def add_note_to_item(event: dict) -> dict:
     })
 
 
+def confirm_manual_answer(event: dict) -> dict:
+    """Confirm/reject AI suggestion for partial-AI items.
+
+    POST body: { "answer": "Yes"|"No"|"N/A", "finding": "...", "action_item": "..." }
+    """
+    path_params   = event.get("pathParameters") or {}
+    inspection_id = path_params.get("inspection_id") or ""
+    item_id       = path_params.get("item_id") or ""
+
+    if not inspection_id or not item_id:
+        return json_response(400, {"error": "inspection_id and item_id are required"})
+
+    body        = parse_body(event)
+    answer      = str(body.get("answer", "")).strip()
+    finding     = str(body.get("finding", "")).strip()
+    action_item = str(body.get("action_item", "")).strip()
+
+    if not answer or answer not in ["Yes", "No", "N/A"]:
+        return json_response(400, {"error": "answer must be Yes, No, or N/A"})
+
+    inspection = load_inspection(inspection_id)
+    if not inspection:
+        return json_response(404, {"error": "Inspection not found"})
+
+    checklist_item, cat_idx, item_idx = find_item(inspection, item_id)
+    if checklist_item is None:
+        return json_response(404, {"error": "Checklist item not found"})
+
+    policy = get_item_ai_policy(item_id)
+
+    # Only partial/manual items with manual_review_required can use this endpoint
+    if not policy.get("manual_review_required"):
+        return json_response(400, {
+            "error": "This item does not require manual confirmation (auto-AI item)"
+        })
+
+    # Confirm the inspector's manual decision
+    ai_suggested = str(checklist_item.get("ai_suggested_answer", "")).strip()
+    inspection_timestamp = now_iso()
+
+    checklist_item["answer"] = answer
+    if finding:
+        checklist_item["finding"] = finding
+    if action_item:
+        checklist_item["action_item"] = action_item
+
+    # Append manual confirmation record to evidence
+    checklist_item.setdefault("evidence", [])
+    checklist_item["evidence"].append({
+        "confirmed_at": inspection_timestamp,
+        "ai_mode": policy.get("mode", "partial"),
+        "manual_review_required": True,
+        "ai_suggested_answer": ai_suggested,
+        "inspector_confirmed_answer": answer,
+        "inspector_finding": finding,
+        "inspector_action_item": action_item,
+        "confirmation_type": "manual_override" if ai_suggested and ai_suggested != answer else "manual_confirm",
+    })
+
+    # Keep ai_suggested_answer for audit trail, but item is now answered
+    inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
+    inspection["status"] = compute_status(inspection)
+    inspection["updated_at"] = inspection_timestamp
+    save_inspection(inspection)
+
+    return json_response(200, {
+        "inspection_id": inspection_id,
+        "item_id": item_id,
+        "message": "Manual confirmation recorded successfully.",
+        "inspector_answer": answer,
+        "ai_suggested_answer": ai_suggested,
+        "confirmation_type": "manual_override" if ai_suggested and ai_suggested != answer else "manual_confirm",
+        "updated_item": checklist_item,
+        "inspection_status": inspection["status"],
+        "inspection": inspection,
+        "categories": inspection.get("categories", []),
+    })
+
 
 def analyze_item_image(event: dict) -> dict:
     body          = parse_body(event)
@@ -1044,79 +1309,190 @@ def analyze_item_image(event: dict) -> dict:
     if checklist_item is None:
         return json_response(404, {"error": "Checklist item not found"})
 
-    try:
-        image_bytes, content_type = _extract_image(body)
-    except FileNotFoundError as e:
-        return json_response(400, {"error": str(e)})
-    except Exception as e:
-        return json_response(400, {"error": f"Invalid image input: {str(e)}"})
+    policy = get_item_ai_policy(item_id)
 
-    if image_bytes is None:
-        return json_response(400, {"error": "Provide image_base64 or file_key"})
+    if policy.get("mode") == "manual":
+        checklist_item.setdefault("evidence", [])
+        checklist_item["evidence"].append({
+            "analyzed_at": now_iso(),
+            "ai_mode": "manual",
+            "manual_review_required": True,
+            "reason": policy.get("reason", "Manual inspection required."),
+        })
+        checklist_item["ai_suggested_answer"] = ""
+        checklist_item["finding"] = policy.get("reason", "Manual inspection required.")
+        checklist_item["action_item"] = "Complete manual check and submit final answer."
+        checklist_item["blocked_by_wrong_image"] = False
 
-    image_bytes, media_type = prepare_image_bytes(image_bytes, content_type)
+        inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
+        inspection["status"] = compute_status(inspection)
+        inspection["updated_at"] = now_iso()
+        save_inspection(inspection)
+
+        return json_response(200, {
+            "inspection_id": inspection_id,
+            "item_id": item_id,
+            "blocked": False,
+            "move_next": False,
+            "pass": False,
+            "ai_mode": "manual",
+            "manual_review_required": True,
+            "confidence_level": policy.get("confidence_level", "n/a"),
+            "media_requirement": policy.get("media_requirement", "manual_action"),
+            "message": "Manual inspection required for this checklist item.",
+            "reason": policy.get("reason", "Manual inspection required."),
+            "updated_item": checklist_item,
+            "inspection_status": inspection.get("status", "in_progress"),
+            "inspection": inspection,
+            "categories": inspection.get("categories", []),
+        })
+
+    # Support multiple images per item: `file_keys` (list) or `image_base64s` (list),
+    # or single `file_key` / `image_base64` (backwards compatible).
+    image_sources = []  # list of tuples: (source_type, payload)
+    if isinstance(body.get("file_keys"), list) and body.get("file_keys"):
+        for fk in body.get("file_keys"):
+            if fk:
+                image_sources.append(("file_key", str(fk).strip()))
+    elif isinstance(body.get("image_base64s"), list) and body.get("image_base64s"):
+        for b64 in body.get("image_base64s"):
+            if b64:
+                image_sources.append(("image_base64", str(b64).strip()))
+    else:
+        # fallback to single image behavior
+        image_sources.append(("single_body", body))
+
+    if not image_sources:
+        return json_response(400, {"error": "Provide file_key(s) or image_base64(s)"})
+
+    per_image_results = []
+    VALID_OBJECTS = {"eyewash_station", "emergency_shower", "eyewash_bottle"}
     rule = CHECKLIST_VISUAL_RULES.get(str(item_id), checklist_item.get("description", ""))
 
-    prompt = build_item_prompt(checklist_item, rule)
+    for idx, src in enumerate(image_sources):
+        try:
+            if src[0] == "file_key":
+                fk = src[1]
+                obj = s3.get_object(Bucket=EVIDENCE_BUCKET, Key=fk)
+                image_bytes = obj["Body"].read()
+                content_type = obj.get("ContentType", "image/jpeg")
+                file_key_for_record = fk
+            elif src[0] == "image_base64":
+                b64 = src[1]
+                if "," in b64 and b64.startswith("data:"):
+                    b64 = b64.split(",", 1)[1]
+                image_bytes = base64.b64decode(b64)
+                content_type = "image/jpeg"
+                file_key_for_record = f"inline_{idx}"
+            else:
+                # single_body: reuse existing extractor
+                image_bytes, content_type = _extract_image(src[1])
+                file_key_for_record = src[1].get("file_key") or src[1].get("fileKey") or f"inline_{idx}"
+        except FileNotFoundError as e:
+            return json_response(400, {"error": str(e)})
+        except Exception as e:
+            return json_response(400, {"error": f"Invalid image input: {str(e)}"})
 
-    try:
-        analysis = invoke_claude_json(IMAGE_ANALYSIS_SYSTEM_PROMPT, prompt,
-                                      image_bytes=image_bytes, media_type=media_type, max_tokens=200)
-    except Exception as e:
-        return json_response(502, {"error": f"Bedrock failed: {str(e)}"})
+        if image_bytes is None:
+            continue
 
-    passed           = bool(analysis.get("pass", False))
-    confidence       = float(analysis.get("confidence", 0.0) or 0.0)
-    object_detected  = str(analysis.get("object_detected", "unclear")).lower().strip()
-    condition_checked = str(analysis.get("condition_checked", "not_visible")).strip()
-    reason           = str(analysis.get("reason", "")).strip()
-    worker_message   = str(analysis.get("worker_message", "")).strip()
-    suggested_action = analysis.get("suggested_action", None)
-    if suggested_action is not None:
-        suggested_action = str(suggested_action).strip() or None
+        image_bytes_prepared, media_type = prepare_image_bytes(image_bytes, content_type)
+        prompt = build_item_prompt(checklist_item, rule, policy)
 
-    VALID_OBJECTS = {"eyewash_station", "emergency_shower", "eyewash_bottle"}
-    wrong_image   = object_detected not in VALID_OBJECTS
-    low_confidence = confidence < 0.35
-    blocked        = wrong_image or low_confidence
+        try:
+            analysis = invoke_claude_json(IMAGE_ANALYSIS_SYSTEM_PROMPT, prompt,
+                                          image_bytes=image_bytes_prepared, media_type=media_type, max_tokens=200)
+        except Exception as e:
+            return json_response(502, {"error": f"Bedrock failed: {str(e)}"})
 
-    file_key = body.get("file_key") or body.get("fileKey") or ""
-    evidence_record = {
-        "file_key": file_key, "analyzed_at": now_iso(),
-        "object_detected": object_detected, "condition_checked": condition_checked,
-        "pass": passed, "is_compliant": passed and not blocked,
-        "confidence": confidence, "reason": reason,
-        "worker_message": worker_message,
-        "suggested_action": suggested_action or "", "blocked": blocked,
-    }
+        passed = bool(analysis.get("pass", False))
+        confidence = float(analysis.get("confidence", 0.0) or 0.0)
+        object_detected = str(analysis.get("object_detected", "unclear")).lower().strip()
+        condition_checked = str(analysis.get("condition_checked", "not_visible")).strip()
+        reason = str(analysis.get("reason", "")).strip()
+        worker_message = str(analysis.get("worker_message", "")).strip()
+        suggested_action = analysis.get("suggested_action", None)
+        if suggested_action is not None:
+            suggested_action = str(suggested_action).strip() or None
 
+        wrong_image = object_detected not in VALID_OBJECTS
+        low_confidence = confidence < 0.35
+        blocked = wrong_image or low_confidence
+
+        per_image_results.append({
+            "file_key": file_key_for_record,
+            "analyzed_at": now_iso(),
+            "ai_mode": policy.get("mode", "ai"),
+            "manual_review_required": bool(policy.get("manual_review_required", False)),
+            "confidence_level": policy.get("confidence_level", "high"),
+            "media_requirement": policy.get("media_requirement", "photo"),
+            "object_detected": object_detected,
+            "condition_checked": condition_checked,
+            "pass": passed,
+            "is_compliant": passed and not blocked,
+            "confidence": confidence,
+            "reason": reason,
+            "worker_message": worker_message,
+            "suggested_action": suggested_action or "",
+            "blocked": blocked,
+        })
+
+    # Merge per-image results into a single decision: prefer any non-blocked pass with highest confidence.
+    if not per_image_results:
+        return json_response(400, {"error": "No valid images were provided or extracted."})
+
+    # Choose best result by highest confidence where not blocked and pass==True; fallback to highest confidence overall
+    non_block_pass = [r for r in per_image_results if (r.get("pass") and not r.get("blocked"))]
+    if non_block_pass:
+        best = max(non_block_pass, key=lambda r: r.get("confidence", 0.0))
+    else:
+        best = max(per_image_results, key=lambda r: r.get("confidence", 0.0))
+
+    # Append all per-image evidence records
     checklist_item.setdefault("evidence", [])
-    checklist_item["evidence"].append(evidence_record)
+    for r in per_image_results:
+        checklist_item["evidence"].append(r)
 
-    if blocked:
+    blocked_overall = all(r.get("blocked", False) for r in per_image_results)
+
+    if blocked_overall:
         checklist_item["blocked_by_wrong_image"] = True
-        checklist_item["answer"]      = ""
-        checklist_item["finding"]     = reason or "Image not sufficient."
-        checklist_item["action_item"] = suggested_action or "Retake a clear image of the eyewash station."
+        checklist_item["answer"] = ""
+        checklist_item["finding"] = best.get("reason") or "Image(s) not sufficient."
+        checklist_item["action_item"] = best.get("suggested_action") or "Retake clear images or short video."
         inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
         inspection["updated_at"] = now_iso()
         save_inspection(inspection)
         return json_response(200, {
             "inspection_id": inspection_id, "item_id": item_id,
             "blocked": True, "move_next": False, "pass": False,
-            "object_detected": object_detected, "condition_checked": condition_checked,
-            "confidence": confidence,
-            "message": worker_message or "Station not clearly visible. Retake image.",
-            "reason": reason, "suggested_action": suggested_action,
+            "object_detected": best.get("object_detected"), "condition_checked": best.get("condition_checked"),
+            "confidence": best.get("confidence"),
+            "message": best.get("worker_message") or "Station not clearly visible. Retake images.",
+            "reason": best.get("reason"), "suggested_action": best.get("suggested_action"),
             "updated_item": checklist_item,
             "inspection_status": inspection.get("status", "in_progress"),
             "inspection": inspection, "categories": inspection.get("categories", []),
         })
 
-    checklist_item["answer"]               = "Yes" if passed else "No"
+    passed_overall = bool(best.get("pass", False)) and not best.get("blocked", False)
+    checklist_item["answer"] = "Yes" if passed_overall else "No"
     checklist_item["blocked_by_wrong_image"] = False
-    checklist_item["finding"]              = reason or ""
-    checklist_item["action_item"]          = suggested_action or ("" if passed else "Correct the issue and retake.")
+    checklist_item["finding"] = best.get("reason") or ""
+    checklist_item["action_item"] = best.get("suggested_action") or ("" if passed_overall else "Correct the issue and retake.")
+
+    manual_review_required = bool(policy.get("manual_review_required", False))
+    if manual_review_required:
+        checklist_item["ai_suggested_answer"] = "Yes" if best.get("pass") else "No"
+        checklist_item["answer"] = ""
+        checklist_item["finding"] = (
+            f"AI suggestion: {'Pass' if best.get('pass') else 'Fail'}. "
+            f"{best.get('reason') or ''}"
+        ).strip()
+        checklist_item["action_item"] = (
+            best.get("suggested_action") or policy.get("reason", "Human confirmation required.")
+        )
+
     inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
 
     next_pos = next_unanswered_index(inspection)
@@ -1127,16 +1503,80 @@ def analyze_item_image(event: dict) -> dict:
 
     return json_response(200, {
         "inspection_id": inspection_id, "item_id": item_id,
-        "blocked": False, "move_next": True, "pass": passed,
-        "object_detected": object_detected, "condition_checked": condition_checked,
-        "confidence": confidence,
-        "message": worker_message or "Item recorded.",
-        "reason": reason, "suggested_action": suggested_action,
+        "blocked": False, "move_next": not manual_review_required, "pass": passed_overall,
+        "ai_mode": policy.get("mode", "ai"),
+        "manual_review_required": manual_review_required,
+        "confidence_level": policy.get("confidence_level", "high"),
+        "media_requirement": policy.get("media_requirement", "photo"),
+        "object_detected": best.get("object_detected"), "condition_checked": best.get("condition_checked"),
+        "confidence": best.get("confidence"),
+        "message": (
+            (best.get("worker_message") or "Item analyzed.")
+            if not manual_review_required
+            else "AI suggestion ready. Manual confirmation required before finalizing."
+        ),
+        "reason": best.get("reason"), "suggested_action": best.get("suggested_action"),
         "updated_item": checklist_item,
         "inspection_status": inspection["status"],
         "current_item_index": inspection.get("current_item_index", 0),
         "inspection": inspection, "categories": inspection.get("categories", []),
     })
+
+
+def batch_analyze_items(event: dict) -> dict:
+    """Batch analyze multiple item images in parallel.
+
+    Expects JSON body: { "inspection_id": "...", "images": [ {"item_id": "1", "file_key": "..."}, ... ] }
+    """
+    body = parse_body(event)
+    inspection_id = str(body.get("inspection_id", "")).strip()
+    images = body.get("images", [])
+
+    if not inspection_id:
+        return json_response(400, {"error": "inspection_id is required"})
+    if not isinstance(images, list) or not images:
+        return json_response(400, {"error": "images must be a non-empty list of {item_id,file_key|image_base64}"})
+
+    # Prepare per-item events
+    child_events = []
+    for img in images:
+        iid = str(img.get("item_id", "")).strip()
+        if not iid:
+            continue
+        child_body = {"inspection_id": inspection_id, "item_id": iid}
+        # Support multiple images per item: file_keys or image_base64s (lists)
+        if "file_keys" in img and isinstance(img.get("file_keys"), list):
+            child_body["file_keys"] = img["file_keys"]
+        elif "file_key" in img:
+            child_body["file_key"] = img["file_key"]
+        if "image_base64s" in img and isinstance(img.get("image_base64s"), list):
+            child_body["image_base64s"] = img["image_base64s"]
+        elif "image_base64" in img:
+            child_body["image_base64"] = img["image_base64"]
+        child_events.append({"body": child_body})
+
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=BATCH_WORKER_COUNT) as ex:
+        futures = {ex.submit(analyze_item_image, ev): ev for ev in child_events}
+        for fut in concurrent.futures.as_completed(futures):
+            ev = futures[fut]
+            try:
+                res = fut.result()
+            except Exception as e:
+                # best-effort: record the exception for the specific item
+                item_id = ev.get("body", {}).get("item_id")
+                results[item_id] = {"error": str(e)}
+                continue
+            # analyze_item_image returns a json_response dict
+            body = res.get("body") if isinstance(res, dict) else None
+            try:
+                parsed = json.loads(body) if isinstance(body, str) else (body or {})
+            except Exception:
+                parsed = body
+            item_id = ev.get("body", {}).get("item_id")
+            results[item_id] = parsed
+
+    return json_response(200, {"inspection_id": inspection_id, "results": results})
 
 
 def get_inspection_report(event: dict) -> dict:
@@ -1181,6 +1621,59 @@ def get_inspection_report(event: dict) -> dict:
                 item["evidence"] = []
 
     return json_response(200, inspection)
+
+
+def delete_inspection(event: dict) -> dict:
+    """
+    Deletes an eyewash inspection record by inspection_id.
+    Also deletes the associated session record from the sessions table.
+
+    Path parameter:
+        inspection_id (required) — The inspection ID to delete
+
+    Query parameter:
+        delete_session (optional, default true) — Also delete the linked session
+    """
+    path_params = event.get("pathParameters", {}) or {}
+    inspection_id = str(path_params.get("inspection_id", "")).strip()
+
+    if not inspection_id:
+        return json_response(400, {"error": "inspection_id is required in the URL path"})
+
+    # Fetch the inspection to verify it exists and get session_id
+    result = inspection_table.get_item(Key={"inspection_id": inspection_id})
+    item = result.get("Item")
+
+    if not item:
+        return json_response(404, {"error": "Inspection not found"})
+
+    session_id = str(item.get("session_id", "")).strip()
+
+    # Delete the inspection
+    try:
+        inspection_table.delete_item(Key={"inspection_id": inspection_id})
+    except Exception as e:
+        logger.exception("Error deleting inspection")
+        return json_response(500, {"error": f"Failed to delete inspection: {str(e)}"})
+
+    # Optionally delete the linked session
+    delete_session_flag = str(
+        (event.get("queryStringParameters") or {}).get("delete_session", "true")
+    ).strip().lower()
+    deleted_session = False
+    if delete_session_flag in {"1", "true", "yes", "y"} and session_id:
+        try:
+            session_table.delete_item(Key={"session_id": session_id})
+            deleted_session = True
+        except Exception as e:
+            logger.warning(f"Warning: Failed to delete linked session {session_id}: {e}")
+
+    return json_response(200, {
+        "message": "Inspection deleted successfully",
+        "inspection_id": inspection_id,
+        "session_id": session_id,
+        "session_deleted": deleted_session,
+    })
 
 
 def delete_session(event: dict) -> dict:
@@ -1429,6 +1922,132 @@ def handle_voice_command(event: dict) -> dict:
     })
 
 
+def compute_progress(inspection: dict) -> dict:
+    """Compute progress stats from inspection categories."""
+    total = 0
+    answered = 0
+    for cat in inspection.get("categories", []):
+        for item in cat.get("items", []):
+            total += 1
+            if item.get("answer", "") != "":
+                answered += 1
+    percentage = round((answered / total) * 100, 1) if total > 0 else 0
+    return {"total": total, "answered": answered, "percentage": percentage}
+
+
+def find_next_unanswered(inspection: dict) -> Optional[str]:
+    """Find the next unanswered item ID in the inspection."""
+    for cat in inspection.get("categories", []):
+        for item in cat.get("items", []):
+            if item.get("answer", "") == "":
+                return str(item.get("id", ""))
+    return None
+
+
+def pause_session_handler(event: dict) -> dict:
+    """POST handler — pause an in-progress inspection session."""
+    path_params = event.get("pathParameters") or {}
+    session_id = path_params.get("session_id", "").strip()
+    if not session_id:
+        return json_response(400, {"error": "session_id is required"})
+
+    inspection = load_inspection_by_any_id(session_id)
+    if not inspection:
+        return json_response(404, {"error": "Inspection not found"})
+
+    body = parse_body(event)
+
+    # Merge incoming categories if provided
+    if isinstance(body.get("categories"), list) and body["categories"]:
+        inspection["categories"] = merge_categories(
+            inspection.get("categories", []), body["categories"]
+        )
+
+    # Update general_results if provided
+    if isinstance(body.get("general_results"), list) and body["general_results"]:
+        inspection["general_results"] = body["general_results"]
+
+    # Update notes if provided
+    if isinstance(body.get("notes"), str) and body["notes"].strip():
+        inspection["notes"] = body["notes"].strip()
+
+    progress = compute_progress(inspection)
+
+    inspection["status"] = "paused"
+    inspection["last_paused_at"] = now_iso()
+    inspection["updated_at"] = now_iso()
+
+    save_inspection(inspection)
+
+    # Update session table record
+    try:
+        session_table.update_item(
+            Key={"session_id": inspection.get("session_id", session_id)},
+            UpdateExpression="SET #status = :status, progress = :progress, inspection_type = :itype, updated_at = :updated_at, last_paused_at = :paused_at",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":status": "paused",
+                ":progress": sanitize_for_dynamodb(progress),
+                ":itype": "eyewash",
+                ":updated_at": now_iso(),
+                ":paused_at": now_iso(),
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Failed to update session table: {e}")
+
+    return json_response(200, {
+        "session_id": inspection.get("session_id", session_id),
+        "inspection_id": inspection.get("inspection_id", ""),
+        "status": "paused",
+        "progress": progress,
+        "last_paused_at": inspection["last_paused_at"],
+    })
+
+
+def resume_session_handler(event: dict) -> dict:
+    """GET handler — resume a paused inspection session."""
+    path_params = event.get("pathParameters") or {}
+    session_id = path_params.get("session_id", "").strip()
+    if not session_id:
+        return json_response(400, {"error": "session_id is required"})
+
+    inspection = load_inspection_by_any_id(session_id)
+    if not inspection:
+        return json_response(404, {"error": "Inspection not found"})
+
+    progress = compute_progress(inspection)
+    next_item_id = find_next_unanswered(inspection)
+
+    inspection["status"] = "in_progress"
+    inspection["resumed_at"] = now_iso()
+    inspection["updated_at"] = now_iso()
+
+    save_inspection(inspection)
+
+    # Update session table record
+    try:
+        session_table.update_item(
+            Key={"session_id": inspection.get("session_id", session_id)},
+            UpdateExpression="SET #status = :status, progress = :progress, updated_at = :updated_at, resumed_at = :resumed_at",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":status": "in_progress",
+                ":progress": sanitize_for_dynamodb(progress),
+                ":updated_at": now_iso(),
+                ":resumed_at": now_iso(),
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Failed to update session table: {e}")
+
+    response_data = copy.deepcopy(inspection)
+    response_data["progress"] = progress
+    response_data["next_unanswered_item_id"] = next_item_id
+
+    return json_response(200, response_data)
+
+
 def lambda_handler(event, context):
     method, path, resource = get_route(event)
 
@@ -1445,6 +2064,12 @@ def lambda_handler(event, context):
     ):
         return get_checklist(event)
 
+    if method == "GET" and (
+        path_endswith(path, "/eyewash/ai-enablement") or
+        path_endswith(path, "/eyewash-inspection/ai-enablement")
+    ):
+        return get_ai_enablement_matrix(event)
+
     if method == "POST" and path_endswith(path, "/eyewash-inspection"):
         body = parse_body(event)
         has_session = bool(str(body.get("session_id", "")).strip())
@@ -1457,6 +2082,11 @@ def lambda_handler(event, context):
     if method == "GET" and path_endswith(path, "/eyewash-inspections"):
         return list_inspections(event)
 
+    if method == "GET" and re.search(r"/eyewash-inspection/[^/]+/completion-readiness$", path):
+        parts = path.rstrip("/").split("/")
+        event["pathParameters"] = {"inspection_id": parts[-2]}
+        return get_completion_readiness(event)
+
     if method == "GET" and re.search(r"/eyewash-inspection/[^/]+$", path):
         inspection_id = path.rstrip("/").split("/")[-1]
         event["pathParameters"] = {"inspection_id": inspection_id}
@@ -1465,8 +2095,16 @@ def lambda_handler(event, context):
     if method == "POST" and path_endswith(path, "/eyewash/analyze"):
         return analyze_item_image(event)
 
+    if method == "POST" and path_endswith(path, "/eyewash/analyze-batch"):
+        return batch_analyze_items(event)
+
     if method == "POST" and path_endswith(path, "/eyewash/voice"):
         return handle_voice_command(event)
+
+    if method == "POST" and re.search(r"/eyewash-inspection/[^/]+/items/[^/]+/confirm$", path):
+        parts = path.rstrip("/").split("/")
+        event["pathParameters"] = {"inspection_id": parts[-4], "item_id": parts[-2]}
+        return confirm_manual_answer(event)
 
     if method == "PATCH" and re.search(r"/(?:eyewash/session|eyewash-inspection)/[^/]+/items/[^/]+/note$", path):
         parts = path.rstrip("/").split("/")
@@ -1478,9 +2116,24 @@ def lambda_handler(event, context):
         event["pathParameters"] = {"inspection_id": parts[-3], "item_id": parts[-1]}
         return update_checklist_item(event)
 
-    if method == "DELETE" and re.search(r"/(?:eyewash/session|eyewash-inspection)/[^/]+$", path):
+    if method == "DELETE" and re.search(r"/eyewash-inspection/[^/]+$", path):
+        inspection_id = path.rstrip("/").split("/")[-1]
+        event["pathParameters"] = {"inspection_id": inspection_id}
+        return delete_inspection(event)
+
+    if method == "DELETE" and re.search(r"/eyewash/session/[^/]+$", path):
         session_id = path.rstrip("/").split("/")[-1]
         event["pathParameters"] = {"session_id": session_id}
         return delete_session(event)
+
+    if method == "POST" and re.search(r"/eyewash/session/[^/]+/pause$", path):
+        session_id = path.rstrip("/").split("/")[-2]
+        event["pathParameters"] = {"session_id": session_id}
+        return pause_session_handler(event)
+
+    if method == "GET" and re.search(r"/eyewash/session/[^/]+/resume$", path):
+        session_id = path.rstrip("/").split("/")[-2]
+        event["pathParameters"] = {"session_id": session_id}
+        return resume_session_handler(event)
 
     return json_response(404, {"error": f"No route for {method} {path or resource}"})

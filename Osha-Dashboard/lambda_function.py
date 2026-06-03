@@ -1,26 +1,35 @@
 """
 OSHA Safety Hub — Dashboard Lambda
-Manages the Company → Location → StationType → Station hierarchy
+Manages the Reseller → Company → Location → StationType → Station hierarchy
 for the frontend dashboard sidebar.
 
 Endpoints:
-    GET    /api/companies                                    → Full nested tree
-    POST   /api/companies                                    → Create company
-    POST   /api/companies/{ck}/locations                     → Create location (auto-creates 5 station types)
-    POST   /api/companies/{ck}/locations/{lk}/stations       → Create station
-    PUT    /api/companies/{company_key}                       → Update company name/state
-    PUT    /api/companies/{ck}/locations/{lk}                 → Update location details
-    PUT    /api/stations/{station_id}                         → Update station status/notes
-    DELETE /api/companies/{company_key}                       → Delete company + all locations & stations
-    DELETE /api/companies/{ck}/locations/{lk}                 → Delete location + all stations
-    DELETE /api/stations/{station_id}                         → Delete a single station
-    GET    /api/alerts                                        → All stations with status != "ok"
-    GET    /admin/inspections                                 → Unified inspection list (all 5 types)
+    --- Reseller CRUD ---
+    GET    /api/resellers                                     → Full nested tree (Reseller→Company→Location→Station)
+    POST   /api/resellers                                     → Create reseller
+    PUT    /api/resellers/{reseller_key}                      → Update reseller name
+    DELETE /api/resellers/{reseller_key}                      → Delete reseller + cascade all companies/locations/stations
+
+    --- Company CRUD ---
+    GET    /api/companies                                     → Full nested tree (optionally filtered by ?reseller_key=)
+    POST   /api/companies                                     → Create company (optional reseller_key in body)
+    POST   /api/companies/{ck}/locations                      → Create location (auto-creates 5 station types)
+    POST   /api/companies/{ck}/locations/{lk}/stations        → Create station
+    PUT    /api/companies/{company_key}                        → Update company name/state
+    PUT    /api/companies/{ck}/locations/{lk}                  → Update location details
+    PUT    /api/stations/{station_id}                          → Update station status/notes
+    DELETE /api/companies/{company_key}                        → Delete company + all locations & stations
+    DELETE /api/companies/{ck}/locations/{lk}                  → Delete location + all stations
+    DELETE /api/stations/{station_id}                          → Delete a single station
+    GET    /api/alerts                                         → All stations with status != "ok"
+    GET    /admin/inspections                                  → Unified inspection list (all 5 types)
 
 DynamoDB Table: osha-dashboard (PK + SK single-table design)
-    Company:  PK=COMPANY#{key}          SK=METADATA
-    Location: PK=COMPANY#{ck}           SK=LOCATION#{lk}
-    Station:  PK=LOCATION#{lk}          SK=STATION#{id}
+    Reseller:          PK=RESELLER#{rk}        SK=METADATA
+    Reseller→Company:  PK=RESELLER#{rk}        SK=COMPANY#{ck}
+    Company:           PK=COMPANY#{key}         SK=METADATA
+    Location:          PK=COMPANY#{ck}          SK=LOCATION#{lk}
+    Station:           PK=LOCATION#{lk}         SK=STATION#{id}
 """
 
 import json
@@ -44,6 +53,9 @@ logger.setLevel(logging.INFO)
 # ─────────────────────────────────────────────
 dynamodb = boto3.resource("dynamodb")
 dashboard_table = dynamodb.Table(os.getenv("DASHBOARD_TABLE_NAME", "osha-dashboard"))
+
+# API Key Authentication
+EXPECTED_API_KEY = os.getenv("API_KEY", "").strip()
 
 # Inspection tables (for admin/inspections endpoint)
 inspection_tables = {
@@ -70,6 +82,27 @@ STATION_TYPES = [
 # Helpers
 # ═══════════════════════════════════════════════
 
+def _normalized_headers(event):
+    """Normalize header keys to lowercase for case-insensitive lookup."""
+    headers = event.get("headers") or {}
+    return {str(k).strip().lower(): ("" if v is None else str(v).strip()) for k, v in headers.items()}
+
+
+def require_api_key(event):
+    """Validate the x-api-key header or query param. Returns None if valid, or an error response."""
+    if not EXPECTED_API_KEY:
+        return build_response(500, {"error": "Server API_KEY env var is not configured"})
+    headers = _normalized_headers(event)
+    provided = (headers.get("x-api-key") or headers.get("x_api_key") or headers.get("apikey") or "").strip()
+    # Fallback: also check query string parameters (for browser URL testing)
+    if not provided:
+        qsp = event.get("queryStringParameters") or {}
+        provided = (qsp.get("x-api-key") or qsp.get("api_key") or qsp.get("apikey") or "").strip()
+    if not provided or provided != EXPECTED_API_KEY:
+        return build_response(403, {"error": "Forbidden", "message": "Invalid or missing API key"})
+    return None
+
+
 def build_response(status_code, body):
     """Standard API Gateway response with CORS headers."""
     return {
@@ -78,10 +111,11 @@ def build_response(status_code, body):
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Api-Key,x-api-key,X-Amz-Date",
+            "Access-Control-Allow-Headers": "Content-Type,x-api-key,X-Amz-Date",
         },
         "body": json.dumps(body, default=str),
     }
+
 
 
 def parse_body(event):
@@ -140,6 +174,255 @@ def scan_full_table(ddb_table):
         resp = ddb_table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
         items.extend(resp.get("Items", []))
     return items
+
+
+# ═══════════════════════════════════════════════
+# RESELLER API 1: GET /api/resellers — Full Nested Tree
+# ═══════════════════════════════════════════════
+def get_resellers(event):
+    """
+    Returns the full Reseller → Company → Location → StationType → Station tree.
+    This is the primary endpoint for the sidebar navigation.
+    """
+    all_items = convert_decimals(scan_full_table(dashboard_table))
+
+    # Separate items by type
+    resellers = {}         # reseller_key → reseller dict
+    reseller_companies = {}  # reseller_key → [company_key, ...]
+    companies = {}         # company_key → company dict
+    locations = {}         # company_key → [location dicts]
+    stations = {}          # location_key → [station dicts]
+
+    for item in all_items:
+        pk = item.get("PK", "")
+        sk = item.get("SK", "")
+
+        if sk == "METADATA" and pk.startswith("RESELLER#"):
+            rk = pk.replace("RESELLER#", "")
+            resellers[rk] = {
+                "key": rk,
+                "name": item.get("name", ""),
+                "companies": [],
+            }
+
+        elif sk.startswith("COMPANY#") and pk.startswith("RESELLER#"):
+            rk = pk.replace("RESELLER#", "")
+            ck = sk.replace("COMPANY#", "")
+            reseller_companies.setdefault(rk, []).append(ck)
+
+        elif sk == "METADATA" and pk.startswith("COMPANY#"):
+            ck = pk.replace("COMPANY#", "")
+            companies[ck] = {
+                "key": ck,
+                "name": item.get("name", ""),
+                "state": item.get("state", ""),
+                "locations": [],
+            }
+
+        elif sk.startswith("LOCATION#") and pk.startswith("COMPANY#"):
+            ck = pk.replace("COMPANY#", "")
+            lk = sk.replace("LOCATION#", "")
+            loc = {
+                "key": lk,
+                "name": item.get("name", ""),
+                "state": item.get("state", ""),
+                "address": item.get("address", ""),
+                "city": item.get("city", ""),
+                "zip": item.get("zip", ""),
+                "phone": item.get("phone", ""),
+                "_company_key": ck,
+            }
+            locations.setdefault(ck, []).append(loc)
+
+        elif sk.startswith("STATION#") and pk.startswith("LOCATION#"):
+            lk = pk.replace("LOCATION#", "")
+            station = {
+                "id": item.get("station_id", sk.replace("STATION#", "")),
+                "name": item.get("name", ""),
+                "route": item.get("route", ""),
+                "status": item.get("status", "ok"),
+                "lastInspected": item.get("lastInspected", ""),
+                "nextDue": item.get("nextDue", ""),
+                "notes": item.get("notes", ""),
+                "typeKey": item.get("typeKey", ""),
+                "_location_key": lk,
+            }
+            stations.setdefault(lk, []).append(station)
+
+    # Helper: build location with nested station types
+    def _build_location(loc):
+        loc_key = loc["key"]
+        loc_stations = stations.get(loc_key, [])
+        station_types = []
+        for st_type in STATION_TYPES:
+            type_stations = [
+                {k: v for k, v in s.items() if not k.startswith("_")}
+                for s in loc_stations
+                if s.get("typeKey") == st_type["key"]
+            ]
+            station_types.append({
+                "key": st_type["key"],
+                "label": st_type["label"],
+                "icon": st_type["icon"],
+                "stations": type_stations,
+            })
+        clean_loc = {k: v for k, v in loc.items() if not k.startswith("_")}
+        clean_loc["stationTypes"] = station_types
+        return clean_loc
+
+    # Helper: build company with nested locations
+    def _build_company(ck):
+        company = companies.get(ck)
+        if not company:
+            return None
+        company_copy = {
+            "key": company["key"],
+            "name": company["name"],
+            "state": company["state"],
+            "locations": [],
+        }
+        for loc in locations.get(ck, []):
+            company_copy["locations"].append(_build_location(loc))
+        return company_copy
+
+    # Build the full reseller tree
+    result = []
+    for rk, reseller in resellers.items():
+        company_keys = reseller_companies.get(rk, [])
+        for ck in company_keys:
+            built = _build_company(ck)
+            if built:
+                reseller["companies"].append(built)
+        result.append(reseller)
+
+    return build_response(200, {"resellers": result})
+
+
+# ═══════════════════════════════════════════════
+# RESELLER API 2: POST /api/resellers — Create Reseller
+# ═══════════════════════════════════════════════
+def create_reseller(event):
+    """Creates a new reseller."""
+    body = parse_body(event)
+    name = str(body.get("name", "")).strip()
+
+    if not name:
+        return build_response(400, {"error": "name is required"})
+
+    key = slugify(name)
+
+    existing = dashboard_table.get_item(Key={"PK": f"RESELLER#{key}", "SK": "METADATA"}).get("Item")
+    if existing:
+        return build_response(409, {"error": f"Reseller '{name}' already exists with key '{key}'"})
+
+    item = {
+        "PK": f"RESELLER#{key}",
+        "SK": "METADATA",
+        "name": name,
+        "created_at": now_iso(),
+    }
+    dashboard_table.put_item(Item=item)
+
+    return build_response(201, {"key": key, "name": name, "companies": []})
+
+
+# ═══════════════════════════════════════════════
+# RESELLER API 3: PUT /api/resellers/{reseller_key} — Update Reseller
+# ═══════════════════════════════════════════════
+def update_reseller(event):
+    """Updates a reseller's name."""
+    path_params = event.get("pathParameters") or {}
+    reseller_key = str(path_params.get("reseller_key", "")).strip()
+    body = parse_body(event)
+
+    if not reseller_key:
+        return build_response(400, {"error": "reseller_key is required"})
+
+    existing = dashboard_table.get_item(Key={"PK": f"RESELLER#{reseller_key}", "SK": "METADATA"}).get("Item")
+    if not existing:
+        return build_response(404, {"error": f"Reseller '{reseller_key}' not found"})
+
+    new_name = str(body.get("name", "")).strip()
+    if not new_name:
+        return build_response(400, {"error": "name is required"})
+
+    dashboard_table.update_item(
+        Key={"PK": f"RESELLER#{reseller_key}", "SK": "METADATA"},
+        UpdateExpression="SET #name = :name, #updated_at = :updated_at",
+        ExpressionAttributeNames={"#name": "name", "#updated_at": "updated_at"},
+        ExpressionAttributeValues={":name": new_name, ":updated_at": now_iso()},
+    )
+
+    return build_response(200, {"key": reseller_key, "name": new_name})
+
+
+# ═══════════════════════════════════════════════
+# RESELLER API 4: DELETE /api/resellers/{reseller_key} — Cascade Delete
+# ═══════════════════════════════════════════════
+def delete_reseller(event):
+    """
+    Deletes a reseller and CASCADE-DELETES all associated companies,
+    their locations, and their stations.
+    """
+    path_params = event.get("pathParameters") or {}
+    reseller_key = str(path_params.get("reseller_key", "")).strip()
+
+    if not reseller_key:
+        return build_response(400, {"error": "reseller_key is required"})
+
+    existing = dashboard_table.get_item(Key={"PK": f"RESELLER#{reseller_key}", "SK": "METADATA"}).get("Item")
+    if not existing:
+        return build_response(404, {"error": f"Reseller '{reseller_key}' not found"})
+
+    all_items = scan_full_table(dashboard_table)
+
+    # Find all company keys associated with this reseller
+    company_keys = []
+    for item in all_items:
+        if item.get("PK") == f"RESELLER#{reseller_key}" and item.get("SK", "").startswith("COMPANY#"):
+            ck = item["SK"].replace("COMPANY#", "")
+            company_keys.append(ck)
+            # Delete the association record
+            dashboard_table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
+
+    # Cascade: delete each company and its children
+    deleted_companies = []
+    deleted_locations = []
+    deleted_stations = []
+
+    for ck in company_keys:
+        # Find locations for this company
+        loc_keys = []
+        for item in all_items:
+            if item.get("PK") == f"COMPANY#{ck}" and item.get("SK", "").startswith("LOCATION#"):
+                lk = item["SK"].replace("LOCATION#", "")
+                loc_keys.append(lk)
+                dashboard_table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
+                deleted_locations.append(lk)
+
+        # Delete stations under those locations
+        for item in all_items:
+            if item.get("PK", "").startswith("LOCATION#") and item.get("SK", "").startswith("STATION#"):
+                lk = item["PK"].replace("LOCATION#", "")
+                if lk in loc_keys:
+                    dashboard_table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
+                    deleted_stations.append(item.get("station_id", ""))
+
+        # Delete the company itself
+        dashboard_table.delete_item(Key={"PK": f"COMPANY#{ck}", "SK": "METADATA"})
+        deleted_companies.append(ck)
+
+    # Delete the reseller itself
+    dashboard_table.delete_item(Key={"PK": f"RESELLER#{reseller_key}", "SK": "METADATA"})
+
+    return build_response(200, {
+        "message": "Reseller deleted successfully (cascade)",
+        "reseller_key": reseller_key,
+        "deleted_companies": deleted_companies,
+        "deleted_locations": deleted_locations,
+        "deleted_stations": deleted_stations,
+    })
+
 
 
 # ═══════════════════════════════════════════════
@@ -238,10 +521,11 @@ def get_companies(event):
 # API 2: POST /api/companies — Create Company
 # ═══════════════════════════════════════════════
 def create_company(event):
-    """Creates a new company."""
+    """Creates a new company. Optionally associates it with a reseller."""
     body = parse_body(event)
     name = str(body.get("name", "")).strip()
     state = str(body.get("state", "")).strip()
+    reseller_key = str(body.get("reseller_key", "")).strip()
 
     if not name:
         return build_response(400, {"error": "name is required"})
@@ -253,6 +537,12 @@ def create_company(event):
     if existing:
         return build_response(409, {"error": f"Company '{name}' already exists with key '{key}'"})
 
+    # If reseller_key provided, verify reseller exists
+    if reseller_key:
+        reseller = dashboard_table.get_item(Key={"PK": f"RESELLER#{reseller_key}", "SK": "METADATA"}).get("Item")
+        if not reseller:
+            return build_response(404, {"error": f"Reseller '{reseller_key}' not found"})
+
     item = {
         "PK": f"COMPANY#{key}",
         "SK": "METADATA",
@@ -262,10 +552,19 @@ def create_company(event):
     }
     dashboard_table.put_item(Item=item)
 
+    # Auto-associate with reseller if provided
+    if reseller_key:
+        dashboard_table.put_item(Item={
+            "PK": f"RESELLER#{reseller_key}",
+            "SK": f"COMPANY#{key}",
+            "associated_at": now_iso(),
+        })
+
     return build_response(201, {
         "key": key,
         "name": name,
         "state": state,
+        "reseller_key": reseller_key or None,
         "locations": [],
     })
 
@@ -491,19 +790,30 @@ def update_station(event):
 # API 6: GET /api/alerts — Stations with Issues
 # ═══════════════════════════════════════════════
 def get_alerts(event):
-    """Returns all stations where status is 'warn' or 'fail', enriched with company/location context."""
+    """Returns all stations where status is 'warn' or 'fail', enriched with reseller/company/location context."""
     all_items = convert_decimals(scan_full_table(dashboard_table))
 
     # Build lookup maps
-    companies = {}   # key → {name, state}
-    locations = {}   # location_key → {name, company_key, ...}
+    resellers = {}               # reseller_key → {name}
+    company_to_reseller = {}     # company_key → reseller_key
+    companies = {}               # key → {name, state}
+    locations = {}               # location_key → {name, company_key, ...}
     alerts = []
 
     for item in all_items:
         pk = item.get("PK", "")
         sk = item.get("SK", "")
 
-        if sk == "METADATA" and pk.startswith("COMPANY#"):
+        if sk == "METADATA" and pk.startswith("RESELLER#"):
+            rk = pk.replace("RESELLER#", "")
+            resellers[rk] = {"name": item.get("name", "")}
+
+        elif sk.startswith("COMPANY#") and pk.startswith("RESELLER#"):
+            rk = pk.replace("RESELLER#", "")
+            ck = sk.replace("COMPANY#", "")
+            company_to_reseller[ck] = rk
+
+        elif sk == "METADATA" and pk.startswith("COMPANY#"):
             key = pk.replace("COMPANY#", "")
             companies[key] = {"name": item.get("name", ""), "state": item.get("state", "")}
 
@@ -535,14 +845,18 @@ def get_alerts(event):
                     "typeLabel": type_label,
                 })
 
-    # Enrich with company/location context
+    # Enrich with reseller/company/location context
     enriched_alerts = []
     for alert in alerts:
         loc_key = alert.pop("_location_key", "")
         loc_info = locations.get(loc_key, {})
         company_key = loc_info.get("company_key", "")
         company_info = companies.get(company_key, {})
+        reseller_key = company_to_reseller.get(company_key, "")
+        reseller_info = resellers.get(reseller_key, {})
 
+        alert["resellerKey"] = reseller_key
+        alert["resellerName"] = reseller_info.get("name", "")
         alert["companyKey"] = company_key
         alert["companyName"] = company_info.get("name", "")
         alert["locationKey"] = loc_key
@@ -568,78 +882,122 @@ def admin_list_inspections(event):
         start_date  — Filter inspections on or after this date (YYYY-MM-DD)
         end_date    — Filter inspections on or before this date (YYYY-MM-DD)
     """
-    params = event.get("queryStringParameters", {}) or {}
-    filter_location = params.get("location", "").strip()
-    filter_start = params.get("start_date", "").strip()
-    filter_end = params.get("end_date", "").strip()
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    try:
+        params = event.get("queryStringParameters", {}) or {}
+        filter_location = str(params.get("location", "") or "").strip()
+        filter_start = str(params.get("start_date", "") or "").strip()
+        filter_end = str(params.get("end_date", "") or "").strip()
 
-    all_inspections = []
+        all_inspections = []
 
-    for type_label, ddb_table in inspection_tables.items():
-        try:
-            items = convert_decimals(scan_full_table(ddb_table))
-            for item in items:
-                all_inspections.append({"_raw": item, "type": type_label})
-        except Exception as e:
-            logger.error(f"Error scanning table for {type_label}: {str(e)}")
+        # Scan all 5 tables in PARALLEL to avoid timeout
+        def _scan_table(type_label, ddb_table):
+            try:
+                items = convert_decimals(scan_full_table(ddb_table))
+                logger.info(f"[ADMIN] Scanned {type_label}: {len(items)} items")
+                return [(item, type_label) for item in items]
+            except Exception as e:
+                logger.error(f"Error scanning table for {type_label}: {str(e)}")
+                return []
 
-    # Build response list with filters and computed fields
-    result_list = []
-    for item_wrapper in all_inspections:
-        raw = item_wrapper["_raw"]
-        categories = raw.get("categories", [])
-        general_results = raw.get("general_results", [])
-        date_of_audit = raw.get("date_of_audit", "")
-        facility_area = raw.get("facility_area", "")
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(_scan_table, label, table): label
+                for label, table in inspection_tables.items()
+            }
+            for future in as_completed(futures):
+                all_inspections.extend(future.result())
 
-        # Apply filters
-        if filter_location and filter_location.lower() != facility_area.lower():
-            continue
-        if filter_start and date_of_audit < filter_start:
-            continue
-        if filter_end and date_of_audit > filter_end:
-            continue
+        logger.info(f"[ADMIN] Total inspections scanned: {len(all_inspections)}")
 
-        status = compute_inspection_status(categories, general_results)
-        evidence = count_evidence(categories)
+        # Build response list with filters and computed fields
+        result_list = []
+        for raw, type_label in all_inspections:
+            try:
+                categories = raw.get("categories") or []
+                general_results = raw.get("general_results") or []
+                date_of_audit = str(raw.get("date_of_audit") or "")
+                facility_area = str(raw.get("facility_area") or "")
 
-        result_list.append({
-            "inspection_id": raw.get("inspection_id"),
-            "session_id": raw.get("session_id"),
-            "company": raw.get("company", "Continental Battery"),
-            "location": facility_area,
-            "type": item_wrapper["type"],
-            "date": date_of_audit,
-            "inspector": raw.get("auditor_name", ""),
-            "evidence_count": evidence,
-            "status": status,
-            "created_at": raw.get("created_at", ""),
-        })
+                # Apply filters
+                if filter_location and filter_location.lower() != facility_area.lower():
+                    continue
+                if filter_start and date_of_audit < filter_start:
+                    continue
+                if filter_end and date_of_audit > filter_end:
+                    continue
 
-    # Sort newest first
-    result_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+                # Honor stored status from pause/resume endpoints
+                stored_status = str(raw.get("status") or "").strip()
+                if stored_status in ("paused", "in_progress"):
+                    status = stored_status
+                else:
+                    status = compute_inspection_status(categories, general_results)
 
-    stats = {
-        "total": len(result_list),
-        "completed": sum(1 for i in result_list if i["status"] == "completed"),
-        "pending": sum(1 for i in result_list if i["status"] == "pending"),
-        "overdue": sum(1 for i in result_list if i["status"] == "overdue"),
-    }
+                evidence = count_evidence(categories)
 
-    return build_response(200, {"stats": stats, "inspections": result_list})
+                # Compute progress for incomplete inspections
+                progress = None
+                if status in ("in_progress", "paused", "pending"):
+                    progress = compute_progress(categories)
+
+                entry = {
+                    "inspection_id": raw.get("inspection_id"),
+                    "session_id": raw.get("session_id"),
+                    "company": raw.get("company", "Continental Battery"),
+                    "location": facility_area,
+                    "type": type_label,
+                    "date": date_of_audit,
+                    "inspector": str(raw.get("auditor_name") or ""),
+                    "evidence_count": evidence,
+                    "status": status,
+                    "created_at": str(raw.get("created_at") or ""),
+                }
+                if progress is not None:
+                    entry["progress"] = progress
+                result_list.append(entry)
+            except Exception as e:
+                logger.error(f"Error processing inspection record: {str(e)}")
+                continue
+
+        # Sort newest first
+        result_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+        stats = {
+            "total": len(result_list),
+            "completed":   sum(1 for i in result_list if i["status"] == "completed"),
+            "in_progress": sum(1 for i in result_list if i["status"] == "in_progress"),
+            "paused":      sum(1 for i in result_list if i["status"] == "paused"),
+            "pending":     sum(1 for i in result_list if i["status"] == "pending"),
+            "overdue":     sum(1 for i in result_list if i["status"] == "overdue"),
+        }
+
+        return build_response(200, {"stats": stats, "inspections": result_list})
+
+    except Exception as e:
+        logger.exception(f"admin_list_inspections failed: {str(e)}")
+        return build_response(500, {"error": f"Internal error: {str(e)}"})
 
 
 def compute_inspection_status(categories, general_results):
     """Calculate inspection status: completed, in_progress, pending, or overdue."""
     answered = 0
     total = 0
+    if not isinstance(categories, list):
+        return "pending"
     for cat in categories:
+        if not isinstance(cat, dict):
+            continue
         for item in cat.get("items", []):
+            if not isinstance(item, dict):
+                continue
             iid = item.get("id")
             if isinstance(iid, int) and iid in (11, 12):
                 continue
             total += 1
-            if item.get("answer", "").strip():
+            answer = str(item.get("answer") or "").strip()
+            if answer:
                 answered += 1
 
     if total == 0:
@@ -654,11 +1012,50 @@ def compute_inspection_status(categories, general_results):
 def count_evidence(categories):
     """Count total evidence items across all checklist items."""
     count = 0
+    if not isinstance(categories, list):
+        return 0
     for cat in categories:
+        if not isinstance(cat, dict):
+            continue
         for item in cat.get("items", []):
+            if not isinstance(item, dict):
+                continue
             evidence = item.get("evidence", [])
             count += len(evidence) if isinstance(evidence, list) else 0
     return count
+
+
+def compute_progress(categories):
+    """Compute completion progress for an inspection's categories."""
+    total = 0
+    answered = 0
+    if not isinstance(categories, list):
+        return {"total": 0, "answered": 0, "percentage": 0}
+    for cat in categories:
+        if not isinstance(cat, dict):
+            continue
+        for item in cat.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            iid = item.get("id")
+            # Skip auto-calculated summary items (fire extinguisher items 11, 12)
+            if isinstance(iid, int) and iid in (11, 12):
+                continue
+            total += 1
+            if str(item.get("answer") or "").strip():
+                answered += 1
+        # Also handle sub_sections (OSHA checklist)
+        for sub in cat.get("sub_sections", []):
+            if not isinstance(sub, dict):
+                continue
+            for item in sub.get("items", []):
+                if not isinstance(item, dict):
+                    continue
+                total += 1
+                if str(item.get("answer") or "").strip():
+                    answered += 1
+    percentage = round((answered / total * 100)) if total > 0 else 0
+    return {"total": total, "answered": answered, "percentage": percentage}
 
 
 # ═══════════════════════════════════════════════
@@ -892,63 +1289,96 @@ def lambda_handler(event, context):
     """
     Main entry point. Routes based on HTTP method and path.
     """
-    http_method = event.get("httpMethod", "")
-    resource = event.get("resource", "")
-    path = event.get("path", "")
+    try:
+        http_method = event.get("httpMethod", "")
+        resource = event.get("resource", "")
+        path = event.get("path", "")
 
-    logger.info(f"Dashboard: {http_method} {resource} (path: {path})")
+        logger.info(f"Dashboard: {http_method} {resource} (path: {path})")
 
-    # CORS preflight
-    if http_method == "OPTIONS":
-        return build_response(200, {"message": "CORS preflight OK"})
+        # CORS preflight
+        if http_method == "OPTIONS":
+            return build_response(200, {"message": "CORS preflight OK"})
 
-    # ── GET /api/companies ──
-    if http_method == "GET" and resource == "/api/companies":
-        return get_companies(event)
+        # API Key validation
+        auth_error = require_api_key(event)
+        if auth_error:
+            return auth_error
 
-    # ── POST /api/companies ──
-    elif http_method == "POST" and resource == "/api/companies":
-        return create_company(event)
+        # ── GET /api/resellers ──
+        if http_method == "GET" and resource == "/api/resellers":
+            return get_resellers(event)
 
-    # ── POST /api/companies/{ck}/locations ──
-    elif http_method == "POST" and resource == "/api/companies/{company_key}/locations":
-        return create_location(event)
+        # ── POST /api/resellers ──
+        elif http_method == "POST" and resource == "/api/resellers":
+            return create_reseller(event)
 
-    # ── POST /api/companies/{ck}/locations/{lk}/stations ──
-    elif http_method == "POST" and resource == "/api/companies/{company_key}/locations/{location_key}/stations":
-        return create_station(event)
+        # ── PUT /api/resellers/{reseller_key} ──
+        elif http_method == "PUT" and resource == "/api/resellers/{reseller_key}":
+            return update_reseller(event)
 
-    # ── PUT /api/companies/{company_key} ──
-    elif http_method == "PUT" and resource == "/api/companies/{company_key}":
-        return update_company(event)
+        # ── DELETE /api/resellers/{reseller_key} ──
+        elif http_method == "DELETE" and resource == "/api/resellers/{reseller_key}":
+            return delete_reseller(event)
 
-    # ── PUT /api/companies/{ck}/locations/{lk} ──
-    elif http_method == "PUT" and resource == "/api/companies/{company_key}/locations/{location_key}":
-        return update_location(event)
 
-    # ── PUT /api/stations/{station_id} ──
-    elif http_method == "PUT" and resource == "/api/stations/{station_id}":
-        return update_station(event)
+        # ── GET /api/companies ──
+        elif http_method == "GET" and resource == "/api/companies":
+            return get_companies(event)
 
-    # ── DELETE /api/companies/{company_key} ──
-    elif http_method == "DELETE" and resource == "/api/companies/{company_key}":
-        return delete_company(event)
+        # ── POST /api/companies ──
+        elif http_method == "POST" and resource == "/api/companies":
+            return create_company(event)
 
-    # ── DELETE /api/companies/{ck}/locations/{lk} ──
-    elif http_method == "DELETE" and resource == "/api/companies/{company_key}/locations/{location_key}":
-        return delete_location(event)
+        # ── POST /api/companies/{ck}/locations ──
+        elif http_method == "POST" and resource == "/api/companies/{company_key}/locations":
+            return create_location(event)
 
-    # ── DELETE /api/stations/{station_id} ──
-    elif http_method == "DELETE" and resource == "/api/stations/{station_id}":
-        return delete_station(event)
+        # ── POST /api/companies/{ck}/locations/{lk}/stations ──
+        elif http_method == "POST" and resource == "/api/companies/{company_key}/locations/{location_key}/stations":
+            return create_station(event)
 
-    # ── GET /api/alerts ──
-    elif http_method == "GET" and resource == "/api/alerts":
-        return get_alerts(event)
+        # ── PUT /api/companies/{company_key} ──
+        elif http_method == "PUT" and resource == "/api/companies/{company_key}":
+            return update_company(event)
 
-    # ── GET /admin/inspections ──
-    elif http_method == "GET" and resource == "/admin/inspections":
-        return admin_list_inspections(event)
+        # ── PUT /api/companies/{ck}/locations/{lk} ──
+        elif http_method == "PUT" and resource == "/api/companies/{company_key}/locations/{location_key}":
+            return update_location(event)
 
-    else:
-        return build_response(404, {"error": f"Route not found: {http_method} {resource}"})
+        # ── PUT /api/stations/{station_id} ──
+        elif http_method == "PUT" and resource == "/api/stations/{station_id}":
+            return update_station(event)
+
+        # ── DELETE /api/companies/{company_key} ──
+        elif http_method == "DELETE" and resource == "/api/companies/{company_key}":
+            return delete_company(event)
+
+        # ── DELETE /api/companies/{ck}/locations/{lk} ──
+        elif http_method == "DELETE" and resource == "/api/companies/{company_key}/locations/{location_key}":
+            return delete_location(event)
+
+        # ── DELETE /api/stations/{station_id} ──
+        elif http_method == "DELETE" and resource == "/api/stations/{station_id}":
+            return delete_station(event)
+
+        # ── GET /api/alerts ──
+        elif http_method == "GET" and resource == "/api/alerts":
+            return get_alerts(event)
+
+        # ── GET /api/inspections (was /admin/inspections) ──
+        elif http_method == "GET" and (
+            resource == "/api/inspections"
+            or resource == "/admin/inspections"
+            or path.rstrip("/").endswith("/api/inspections")
+            or path.rstrip("/").endswith("/admin/inspections")
+        ):
+            logger.info("[ADMIN] Entering admin_list_inspections")
+            return admin_list_inspections(event)
+
+        else:
+            return build_response(404, {"error": f"Route not found: {http_method} {resource} (path: {path})"})
+
+    except Exception as e:
+        logger.exception(f"FATAL handler crash: {str(e)}")
+        return build_response(500, {"error": f"Handler crash: {str(e)}"})
