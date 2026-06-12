@@ -1,8 +1,8 @@
 # Mobile Inspection Status API — Backend ↔ Frontend Contract
-**Date:** June 12, 2026  
+**Date:** June 12, 2026 (Updated: June 12, 2026 — v2 after frontend review)  
 **From:** Backend Team  
 **To:** Frontend / Mobile Team  
-**Status:** Draft — Please review and confirm before we start coding
+**Status:** APPROVED — Both sides aligned. Ready to build.
 
 ---
 
@@ -17,7 +17,7 @@ This endpoint reads from our existing tables — no new database tables are need
 ## Endpoint
 
 ```
-GET /api/mobile/inspection-status?location_key={location_key}&category={category}
+GET /api/mobile/inspection-status?location_key={location_key}&category={category}&auditor_name={auditor_name}
 ```
 
 ### Query Parameters
@@ -26,6 +26,7 @@ GET /api/mobile/inspection-status?location_key={location_key}&category={category
 |----------------|----------|--------|-------------|
 | `location_key` | Yes      | string | The location slug from the dashboard (e.g. `"austin-tx"`) |
 | `category`     | No       | string | Filter to a single category. If omitted, returns all 6 categories. Values: `eyewash`, `fire`, `exitdoor`, `racking`, `hra`, `recordkeeping` |
+| `auditor_name` | No       | string | Filter progress to a specific inspector. If provided, counts only this person's inspections. If omitted, shows location-level totals (all inspectors combined). Example: `"Rahul Kumar Yadav"` |
 
 ### Authentication
 
@@ -249,7 +250,54 @@ Use the existing endpoint:
 GET /api/companies
 ```
 
-This returns the full hierarchy. Extract the location names and keys from the response to populate the location dropdown.
+Headers: `x-api-key: {your_api_key}`
+
+### Response shape
+
+```json
+{
+  "companies": [
+    {
+      "key": "greenfield-energy",
+      "name": "Greenfield Energy",
+      "state": "TX",
+      "locations": [
+        {
+          "key": "austin-tx",
+          "name": "Austin Plant",
+          "state": "TX",
+          "address": "123 Industrial Blvd",
+          "city": "Austin",
+          "zip": "73301",
+          "phone": "512-555-0100",
+          "stationTypes": [
+            {
+              "key": "eyewash",
+              "label": "Eyewash",
+              "icon": "fa-eye",
+              "stations": [
+                {
+                  "id": "austin-tx-eyewash-a1b2c3",
+                  "name": "Eyewash Station #1",
+                  "status": "ok",
+                  "lastInspected": "2026-05-15",
+                  "nextDue": "2026-06-15"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+### How to populate the location dropdown
+
+Loop through `companies[].locations[]` and use:
+- **Display text**: `location.name` (e.g. "Austin Plant")
+- **Value to send**: `location.key` (e.g. "austin-tx") — this is the `location_key` param for the inspection-status endpoint
 
 ---
 
