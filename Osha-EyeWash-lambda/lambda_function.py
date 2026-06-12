@@ -901,54 +901,6 @@ def get_checklist(event: dict) -> dict:
     return json_response(200, EYEWASH_CHECKLIST)
 
 
-def create_session(event: dict) -> dict:
-    body          = parse_body(event)
-    auditor_name  = str(body.get("auditor_name", "")).strip()
-    facility_area = str(body.get("facility_area", "")).strip()
-    date_of_audit = str(body.get("date_of_audit", "")).strip()
-    notes         = str(body.get("notes", "")).strip()
-
-    if not auditor_name:
-        return json_response(400, {"error": "auditor_name is required"})
-    if not facility_area:
-        return json_response(400, {"error": "facility_area is required"})
-    if not date_of_audit:
-        return json_response(400, {"error": "date_of_audit is required"})
-
-    session_id    = str(uuid.uuid4())
-    inspection_id = str(uuid.uuid4())
-    created_at    = now_iso()
-
-    general_info                = copy.deepcopy(EYEWASH_CHECKLIST.get("general_information", {}))
-    general_info["location"]    = facility_area
-    general_info["start_date"]  = date_of_audit
-    general_info["leader"]      = auditor_name
-    general_info["team"]        = []
-
-    session_table.put_item(Item=sanitize_for_dynamodb({
-        "session_id": session_id, "inspection_id": inspection_id,
-        "auditor_name": auditor_name, "facility_area": facility_area,
-        "date_of_audit": date_of_audit, "created_at": created_at,
-    }))
-
-    checklist = deep_copy_checklist()
-    inspection_table.put_item(Item=sanitize_for_dynamodb({
-        "inspection_id": inspection_id, "session_id": session_id,
-        "inspection_type": "eyewash", "auditor_name": auditor_name,
-        "facility_area": facility_area, "date_of_audit": date_of_audit,
-        "status": "in_progress", "current_item_index": 0,
-        "general_information": general_info,
-        "categories": checklist["categories"],
-        "general_results": checklist["general_results"],
-        "notes": notes, "created_at": created_at, "updated_at": created_at,
-    }))
-
-    return json_response(201, {
-        "session_id": session_id, "inspection_id": inspection_id,
-        "created_at": created_at,
-        "checklist": EYEWASH_CHECKLIST,
-    })
-
 
 def create_inspection_from_session_payload(event: dict) -> dict:
     body               = parse_body(event)
@@ -981,13 +933,17 @@ def create_inspection_from_session_payload(event: dict) -> dict:
         if existing_for_meta:
             session = {
                 "auditor_name":  str(existing_for_meta.get("auditor_name",  body.get("auditor_name",  ""))).strip(),
+                "location":      str(existing_for_meta.get("location",      body.get("location",      ""))).strip(),
                 "facility_area": str(existing_for_meta.get("facility_area", body.get("facility_area", ""))).strip(),
+                "station":       str(existing_for_meta.get("station",       body.get("station",       ""))).strip(),
                 "date_of_audit": str(existing_for_meta.get("date_of_audit", body.get("date_of_audit", ""))).strip(),
             }
         else:
             session = {
                 "auditor_name":  str(body.get("auditor_name",  "")).strip(),
+                "location":      str(body.get("location",      "")).strip(),
                 "facility_area": str(body.get("facility_area", "")).strip(),
+                "station":       str(body.get("station",       "")).strip(),
                 "date_of_audit": str(body.get("date_of_audit", "")).strip(),
             }
 
@@ -1012,7 +968,9 @@ def create_inspection_from_session_payload(event: dict) -> dict:
         "inspection_id": inspection_id, "session_id": preserved_sid,
         "inspection_type": "eyewash",
         "auditor_name": session.get("auditor_name", ""),
+        "location": session.get("location", ""),
         "facility_area": session.get("facility_area", ""),
+        "station": session.get("station", ""),
         "date_of_audit": session.get("date_of_audit", ""),
         "team": merged_team, "categories": merged_cats,
         "general_results": merged_results, "notes": merged_notes,
@@ -1058,7 +1016,9 @@ def list_inspections(event: dict) -> dict:
             "inspection_id": item.get("inspection_id"),
             "session_id":    item.get("session_id"),
             "auditor_name":  item.get("auditor_name"),
+            "location":      item.get("location"),
             "facility_area": item.get("facility_area"),
+            "station":       item.get("station"),
             "date_of_audit": item.get("date_of_audit"),
             "status":        item.get("status", compute_status(item)),
             "created_at":    item.get("created_at"),
@@ -2071,13 +2031,7 @@ def lambda_handler(event, context):
         return get_ai_enablement_matrix(event)
 
     if method == "POST" and path_endswith(path, "/eyewash-inspection"):
-        body = parse_body(event)
-        has_session = bool(str(body.get("session_id", "")).strip())
-        has_insp_id = bool(str(body.get("inspection_id", "")).strip())
-        has_categories = isinstance(body.get("categories"), list)
-        if (has_session or has_insp_id) and has_categories:
-            return create_inspection_from_session_payload(event)
-        return create_session(event)
+        return create_inspection_from_session_payload(event)
 
     if method == "GET" and path_endswith(path, "/eyewash-inspections"):
         return list_inspections(event)

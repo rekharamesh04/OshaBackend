@@ -62,6 +62,7 @@ inspection_tables = {
     "Recordkeeping":      dynamodb.Table(os.getenv("RECORDKEEPING_TABLE", "osha-inspections")),
     "Eyewash":            dynamodb.Table(os.getenv("EYEWASH_TABLE", "osha-eyewash-inspections")),
     "Fire Extinguisher":  dynamodb.Table(os.getenv("FIRE_EXT_TABLE", "osha-fire-extinguisher-inspections")),
+    "Exit Door":          dynamodb.Table(os.getenv("EXIT_DOOR_TABLE", "osha-exit-door-inspections")),
     "Monthly Racking":    dynamodb.Table(os.getenv("RACKING_TABLE", "osha-racking-inspections")),
     "Quarterly HRA":      dynamodb.Table(os.getenv("HRA_TABLE", "osha-hra-inspections")),
 }
@@ -72,6 +73,7 @@ inspection_tables = {
 STATION_TYPES = [
     {"key": "eyewash",       "label": "Eyewash",           "icon": "fa-eye"},
     {"key": "fire",          "label": "Fire Extinguisher",  "icon": "fa-fire-extinguisher"},
+    {"key": "exitdoor",      "label": "Exit Door",          "icon": "fa-door-open"},
     {"key": "racking",       "label": "Monthly Racking",    "icon": "fa-th-large"},
     {"key": "hra",           "label": "Quarterly HRA",      "icon": "fa-clipboard-list"},
     {"key": "recordkeeping", "label": "Recordkeeping",      "icon": "fa-folder-open"},
@@ -874,7 +876,7 @@ def get_alerts(event):
 # ═══════════════════════════════════════════════
 def admin_list_inspections(event):
     """
-    Returns a unified list of ALL inspections from all 5 types,
+    Returns a unified list of ALL inspections from all 6 types,
     with computed status, evidence count, and aggregate stats.
 
     Query Parameters (all optional):
@@ -901,7 +903,7 @@ def admin_list_inspections(event):
                 logger.error(f"Error scanning table for {type_label}: {str(e)}")
                 return []
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
                 executor.submit(_scan_table, label, table): label
                 for label, table in inspection_tables.items()
@@ -918,11 +920,14 @@ def admin_list_inspections(event):
                 categories = raw.get("categories") or []
                 general_results = raw.get("general_results") or []
                 date_of_audit = str(raw.get("date_of_audit") or "")
+                location = str(raw.get("location") or "")
                 facility_area = str(raw.get("facility_area") or "")
 
-                # Apply filters
-                if filter_location and filter_location.lower() != facility_area.lower():
-                    continue
+                # Apply filters — match against location first, then facility_area
+                if filter_location:
+                    match_target = location if location else facility_area
+                    if filter_location.lower() != match_target.lower():
+                        continue
                 if filter_start and date_of_audit < filter_start:
                     continue
                 if filter_end and date_of_audit > filter_end:
@@ -945,8 +950,9 @@ def admin_list_inspections(event):
                 entry = {
                     "inspection_id": raw.get("inspection_id"),
                     "session_id": raw.get("session_id"),
-                    "company": raw.get("company", "Continental Battery"),
-                    "location": facility_area,
+                    "location": location,
+                    "facility_area": facility_area,
+                    "station": str(raw.get("station") or ""),
                     "type": type_label,
                     "date": date_of_audit,
                     "inspector": str(raw.get("auditor_name") or ""),

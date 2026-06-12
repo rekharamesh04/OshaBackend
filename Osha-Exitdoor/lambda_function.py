@@ -43,13 +43,13 @@ AI-ANALYZABLE ITEMS (camera photo → Claude decision):
  12  Directional Indicators
  13  NOT AN EXIT Labels
  14  Direct Discharge (door leads outside)
+ 15  No High-Hazard Travel (visible hazards along exit path)
  17  Outside Safety (barriers near traffic)
 
 NON-AI ITEMS (manual inspector answer only):
   2  Side-Hinged Design       — requires physical push/pull test
   4  Panic Hardware Force     — requires force measurement
   5  Fail-Safe Reliability    — requires wiring/alarm assessment
- 15  No High-Hazard Travel    — requires knowledge of facility layout
  16  Self-Closing Fire Doors  — requires certification check
  18  Summary: total inspected (auto-calculated)
  19  Summary: total compliant (auto-calculated)
@@ -119,8 +119,8 @@ ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # AI-ANALYZABLE vs NON-AI ITEM CLASSIFICATION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AI_ANALYZABLE_ITEMS = {1, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17}
-NON_AI_ITEMS        = {2, 4, 5, 15, 16}    # require physical test / cert check
+AI_ANALYZABLE_ITEMS = {1, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17}
+NON_AI_ITEMS        = {2, 4, 5, 16}        # require physical test / cert check
 SUMMARY_ITEMS       = {18, 19}              # auto-calculated
 
 # ─────────────────────────────────────────────
@@ -201,7 +201,7 @@ EXIT_DOOR_CHECKLIST = {
                 _item(14, "Direct Discharge: Does the exit door lead directly outside, or to a street, walkway, or open public refuge area?",
                       True),
                 _item(15, "No High-Hazard Travel: Is the exit path arranged so employees do not have to walk toward high-hazard areas (like chemical storage or furnace rooms) to escape?",
-                      False),
+                      True),
                 _item(16, "Self-Closing Fire Doors: If the door is a fire door connecting multiple stories, is it certified and self-closing?",
                       False),
                 _item(17, "Outside Safety: If the door opens directly onto an alley or driveway where vehicles operate, are there barriers or warnings to keep workers from stepping directly into traffic?",
@@ -364,6 +364,28 @@ CHECKLIST_VISUAL_RULES = {
         "  - There is clearly no outdoor discharge path.\n\n"
         "NEED REVIEW if the discharge destination cannot be determined from the image."
     ),
+    "15": (
+        "RULE — NO HIGH-HAZARD TRAVEL ALONG EXIT PATH:\n\n"
+        "IMPORTANT: This item is N/A if the exit path is clearly a clean corridor with no visible\n"
+        "hazardous materials or equipment of any kind.\n\n"
+        "PASS if ALL of the following are true:\n"
+        "  1. The exit path / corridor visible in the image is clear of high-hazard indicators.\n"
+        "  2. NO chemical drums, gas cylinders, flammable storage cabinets (red/yellow cabinets),\n"
+        "     or hazardous material containers are visible along the exit route.\n"
+        "  3. NO heavy machinery, industrial equipment, or furnace/boiler installations are present\n"
+        "     in or directly adjacent to the visible exit path.\n"
+        "  4. NO HAZMAT warning signs (diamond placards, FLAMMABLE, DANGER, CHEMICAL STORAGE,\n"
+        "     COMPRESSED GAS labels) are visible on walls, doors, or equipment along the route.\n\n"
+        "FAIL if:\n"
+        "  - Flammable storage cabinets (typically red or yellow) are visible in the exit path.\n"
+        "  - Chemical drums, barrels, or containers with HAZMAT labels appear alongside the route.\n"
+        "  - Gas cylinders (compressed gas) are stored or chained in the exit corridor.\n"
+        "  - Heavy industrial machinery or furnace/boiler equipment occupies the exit path.\n"
+        "  - Warning signs such as DANGER, FLAMMABLE, HAZARDOUS MATERIAL, or CHEMICAL STORAGE\n"
+        "    are posted on or immediately adjacent to the exit route.\n\n"
+        "N/A if the corridor shown is clearly an ordinary hallway, office, or retail space with\n"
+        "no industrial equipment or hazardous materials visible anywhere in the frame."
+    ),
     "17": (
         "RULE — OUTSIDE SAFETY (BARRIERS NEAR VEHICLE TRAFFIC):\n\n"
         "IMPORTANT: This item is N/A if the door does NOT open onto a vehicle traffic area.\n\n"
@@ -392,6 +414,7 @@ VALIDATION_KEYWORDS = {
     "12": ["exit", "sign", "arrow", "direction", "corridor", "hallway", "pointing"],
     "13": ["not an exit", "closet", "storeroom", "breakroom", "door", "label", "sign"],
     "14": ["outside", "exterior", "door", "discharge", "outdoor", "street", "walkway"],
+    "15": ["hazard", "chemical", "flammable", "gas", "cylinder", "drum", "machinery", "danger", "warning", "storage", "cabinet", "furnace", "boiler"],
     "17": ["barrier", "bollard", "guardrail", "vehicle", "traffic", "alley", "driveway"],
 }
 
@@ -790,6 +813,7 @@ def item_zoom_hint(item_id: str) -> str:
         "12": "Show the corridor/hallway pointing toward the exit. Include any directional signs.",
         "13": "Show the non-exit door clearly. Include any label or sign on the door.",
         "14": "Show the exit door open or from outside to confirm it leads outdoors.",
+        "15": "Photograph the full length of the exit corridor from floor to ceiling. Capture walls, floor, and any equipment or storage visible along the route.",
         "17": "Show the exterior door area including any barriers or the driveway/alley nearby.",
     }
     return hints.get(str(item_id), "")
@@ -1080,13 +1104,17 @@ def create_inspection(event):
 
     if session:
         auditor_name  = str(session.get("auditor_name",  body.get("auditor_name",  ""))).strip()
+        location      = str(session.get("location",      body.get("location",      ""))).strip()
         facility_area = str(session.get("facility_area", body.get("facility_area", ""))).strip()
+        station       = str(session.get("station",       body.get("station",       ""))).strip()
         date_of_audit = str(session.get("date_of_audit", body.get("date_of_audit", ""))).strip()
         if not inspection_id:
             inspection_id = str(session.get("inspection_id", "")).strip()
     else:
         auditor_name  = str(body.get("auditor_name",  "")).strip()
+        location      = str(body.get("location",      "")).strip()
         facility_area = str(body.get("facility_area", "")).strip()
+        station       = str(body.get("station",       "")).strip()
         date_of_audit = str(body.get("date_of_audit", "")).strip()
 
     existing = load_inspection(inspection_id) if inspection_id else None
@@ -1109,7 +1137,9 @@ def create_inspection(event):
         record.update({
             "session_id":      session_id or existing.get("session_id", ""),
             "auditor_name":    auditor_name  or existing.get("auditor_name",  ""),
+            "location":        location      or existing.get("location",      ""),
             "facility_area":   facility_area or existing.get("facility_area", ""),
+            "station":         station       or existing.get("station",       ""),
             "date_of_audit":   date_of_audit or existing.get("date_of_audit", ""),
             "team":            team if team else existing.get("team", []),
             "categories":      merged_cats,
@@ -1145,7 +1175,9 @@ def create_inspection(event):
         "inspection_id":      inspection_id,
         "session_id":         session_id,
         "auditor_name":       auditor_name,
+        "location":           location,
         "facility_area":      facility_area,
+        "station":            station,
         "date_of_audit":      date_of_audit,
         "team":               team if team else [],
         "categories":         categories,
@@ -1179,7 +1211,9 @@ def list_inspections(event):
         "inspection_id":      item.get("inspection_id"),
         "session_id":         item.get("session_id"),
         "auditor_name":       item.get("auditor_name"),
+        "location":           item.get("location"),
         "facility_area":      item.get("facility_area"),
+        "station":            item.get("station"),
         "date_of_audit":      item.get("date_of_audit"),
         "team":               item.get("team", []),
         "status":             item.get("status", "unknown"),
@@ -1211,7 +1245,9 @@ def get_inspection(event):
         "inspection_id":   item.get("inspection_id"),
         "session_id":      item.get("session_id"),
         "auditor_name":    item.get("auditor_name"),
+        "location":        item.get("location"),
         "facility_area":   item.get("facility_area"),
+        "station":         item.get("station"),
         "date_of_audit":   item.get("date_of_audit"),
         "team":            item.get("team", []),
         "categories":      item.get("categories", []),
@@ -1656,12 +1692,17 @@ def _analyze_single_item_bedrock(
     Used by _THREAD_POOL for parallel multi-item analysis.
     """
     bedrock_img, bedrock_type = prepare_image_bytes(image_bytes, content_type)
-    rule = checklist_rule_for_item(item_id, checklist_item)
+    rule    = checklist_rule_for_item(item_id, checklist_item)
     ai_flag = checklist_item.get("ai_analyzable", False)
+
+    # Use .get() with safe fallbacks so a missing/None field never crashes here
+    item_db_id   = checklist_item.get("id", item_id)
+    item_desc    = checklist_item.get("description") or checklist_item.get("desc") or f"Checklist item {item_id}"
+
     prompt = (
         f"Checklist item to inspect:\n"
-        f"- item_id: {checklist_item['id']}\n"
-        f"- item_description: {checklist_item['description']}\n"
+        f"- item_id: {item_db_id}\n"
+        f"- item_description: {item_desc}\n"
         f"- ai_analyzable: {ai_flag}\n"
         f"- strict_visual_rule: {rule}\n\n"
         f"STEP 1: Is a physical exit door or exit route element clearly and unambiguously visible?\n"

@@ -1193,7 +1193,7 @@ def load_inspection(inspection_id):
 
 def save_inspection(inspection):
     """Save an inspection record back to DynamoDB."""
-    table.put_item(Item=inspection)
+    table.put_item(Item=sanitize_for_dynamodb(inspection))
 
 
 def load_inspection_by_session_id(session_id: str):
@@ -2256,6 +2256,8 @@ def create_inspection(event):
     auditor_name  = ""
     facility_area = ""
     date_of_audit = ""
+    location      = ""
+    station       = ""
 
     if session_id:
         session_resp = sessions_table.get_item(Key={"session_id": session_id})
@@ -2264,6 +2266,8 @@ def create_inspection(event):
             auditor_name  = str(session.get("auditor_name",  body.get("auditor_name",  ""))).strip()
             facility_area = str(session.get("facility_area", body.get("facility_area", ""))).strip()
             date_of_audit = str(session.get("date_of_audit", body.get("date_of_audit", ""))).strip()
+            location      = str(session.get("location",      body.get("location",      ""))).strip()
+            station       = str(session.get("station",       body.get("station",       ""))).strip()
             # If session holds an inspection_id and none was provided, use it
             if not inspection_id:
                 inspection_id = str(session.get("inspection_id", "")).strip()
@@ -2272,10 +2276,14 @@ def create_inspection(event):
             auditor_name  = str(body.get("auditor_name",  "")).strip()
             facility_area = str(body.get("facility_area", "")).strip()
             date_of_audit = str(body.get("date_of_audit", "")).strip()
+            location      = str(body.get("location",      "")).strip()
+            station       = str(body.get("station",       "")).strip()
     else:
         auditor_name  = str(body.get("auditor_name",  "")).strip()
         facility_area = str(body.get("facility_area", "")).strip()
         date_of_audit = str(body.get("date_of_audit", "")).strip()
+        location      = str(body.get("location",      "")).strip()
+        station       = str(body.get("station",       "")).strip()
 
     # ─────────────────────────────────────────────
     # FIX 4: Merge with existing inspection instead of always creating new.
@@ -2322,6 +2330,8 @@ def create_inspection(event):
             "auditor_name":       auditor_name  or existing.get("auditor_name",  ""),
             "facility_area":      facility_area or existing.get("facility_area", ""),
             "date_of_audit":      date_of_audit or existing.get("date_of_audit", ""),
+            "location":           location      or existing.get("location",      ""),
+            "station":            station       or existing.get("station",       ""),
             "team":               merged_team,
             "categories":         merged_cats,
             "general_results":    merged_gr,
@@ -2329,7 +2339,7 @@ def create_inspection(event):
             "status":             compute_status({"categories": merged_cats}),
             "updated_at":         updated_at,
         })
-        table.put_item(Item=sanitize_for_dynamodb(record))
+        save_inspection(record)
         return build_response(200, {
             "inspection_id": inspection_id,
             "session_id":    session_id or existing.get("session_id", ""),
@@ -2360,6 +2370,8 @@ def create_inspection(event):
         "auditor_name":       auditor_name,
         "facility_area":      facility_area,
         "date_of_audit":      date_of_audit,
+        "location":           location,
+        "station":            station,
         "team":               team if team else [],
         "categories":         categories,
         "general_results":    general_results if general_results else [],
@@ -2369,7 +2381,7 @@ def create_inspection(event):
         "created_at":         created_at,
         "updated_at":         created_at,
     }
-    table.put_item(Item=sanitize_for_dynamodb(record))
+    save_inspection(record)
     return build_response(201, {
         "inspection_id": inspection_id,
         "session_id":    session_id,
@@ -2398,6 +2410,8 @@ def list_inspections(event):
             "auditor_name":       item.get("auditor_name"),
             "facility_area":      item.get("facility_area"),
             "date_of_audit":      item.get("date_of_audit"),
+            "location":           item.get("location"),
+            "station":            item.get("station"),
             "team":               item.get("team", []),
             "status":             item.get("status", "unknown"),
             "created_at":         item.get("created_at"),
@@ -2446,6 +2460,8 @@ def get_inspection(event):
         "auditor_name":  item.get("auditor_name"),
         "facility_area": item.get("facility_area"),
         "date_of_audit": item.get("date_of_audit"),
+        "location":      item.get("location"),
+        "station":       item.get("station"),
         "team":          item.get("team", []),
         "categories":    categories,
         "general_results": item.get("general_results", []),
@@ -2520,7 +2536,7 @@ def update_checklist_item(event):
     update_summary_items(inspection)
     inspection["status"] = compute_status(inspection)
     inspection["updated_at"] = now_iso()
-    save_inspection(sanitize_for_dynamodb(inspection))
+    save_inspection(inspection)
 
     return build_response(200, {
         "message":          f"Item {item_id} updated",
@@ -2561,7 +2577,7 @@ def add_note_to_item(event):
 
     inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
     inspection["updated_at"] = now_iso()
-    save_inspection(sanitize_for_dynamodb(inspection))
+    save_inspection(inspection)
 
     return build_response(200, {
         "message": f"Note added to item {item_id}",
@@ -2926,7 +2942,7 @@ def analyze_item_image(event, _is_async=False):
         update_summary_items(inspection)
         inspection["status"]     = compute_status(inspection)
         inspection["updated_at"] = now_iso()
-        save_inspection(sanitize_for_dynamodb(inspection))
+        save_inspection(inspection)
         item11, _, _ = find_item(inspection, "11")
         item12, _, _ = find_item(inspection, "12")
         return build_response(200, {
@@ -2986,7 +3002,7 @@ def analyze_item_image(event, _is_async=False):
             checklist_item["action_item"] = action
             inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
             inspection["updated_at"] = now_iso()
-            save_inspection(sanitize_for_dynamodb(inspection))
+            save_inspection(inspection)
             return build_response(200, {
                 "inspection_id":      inspection_id,
                 "item_id":            item_id,
@@ -3183,7 +3199,7 @@ def analyze_item_image(event, _is_async=False):
         update_summary_items(inspection)
         inspection["status"]     = compute_status(inspection)
         inspection["updated_at"] = now_iso()
-        save_inspection(sanitize_for_dynamodb(inspection))
+        save_inspection(inspection)
 
         item11, _, _ = find_item(inspection, "11")
         item12, _, _ = find_item(inspection, "12")
@@ -3594,7 +3610,7 @@ def analyze_item_image(event, _is_async=False):
 
         inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
         inspection["updated_at"] = now_iso()
-        save_inspection(sanitize_for_dynamodb(inspection))
+        save_inspection(inspection)
 
         return build_response(200, {
             "inspection_id":      inspection_id,
@@ -3636,7 +3652,7 @@ def analyze_item_image(event, _is_async=False):
     update_summary_items(inspection)
     inspection["status"]     = compute_status(inspection)
     inspection["updated_at"] = now_iso()
-    save_inspection(sanitize_for_dynamodb(inspection))
+    save_inspection(inspection)
 
     item11, _, _ = find_item(inspection, "11")
     item12, _, _ = find_item(inspection, "12")
@@ -3733,7 +3749,7 @@ def pause_session(event):
         inspection["status"] = "paused"
         inspection["last_paused_at"] = ts
         inspection["updated_at"] = ts
-        save_inspection(sanitize_for_dynamodb(inspection))
+        save_inspection(inspection)
 
         # ── Update session table ─────────────────────────────────────
         try:
@@ -3784,7 +3800,7 @@ def resume_session(event):
         inspection["status"] = "in_progress"
         inspection["resumed_at"] = ts
         inspection["updated_at"] = ts
-        save_inspection(sanitize_for_dynamodb(inspection))
+        save_inspection(inspection)
 
         # ── Update session table ─────────────────────────────────────
         try:

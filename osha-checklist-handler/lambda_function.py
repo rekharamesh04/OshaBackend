@@ -315,7 +315,9 @@ def create_session(event):
     {
         "auditor_name": "string",
         "facility_area": "string",
-        "date_of_audit": "YYYY-MM-DD"
+        "date_of_audit": "YYYY-MM-DD",
+        "location": "string",          // optional
+        "station": "string"             // optional
     }
     """
     try:
@@ -327,6 +329,8 @@ def create_session(event):
     auditor_name = body.get("auditor_name", "").strip()
     facility_area = body.get("facility_area", "").strip()
     date_of_audit = body.get("date_of_audit", "").strip()
+    location = body.get("location", "").strip()
+    station = body.get("station", "").strip()
 
     if not auditor_name:
         return build_response(400, {"error": "auditor_name is required"})
@@ -345,6 +349,8 @@ def create_session(event):
         "auditor_name": auditor_name,
         "facility_area": facility_area,
         "date_of_audit": date_of_audit,
+        "location": location,
+        "station": station,
         "created_at": created_at,
     }
 
@@ -355,6 +361,8 @@ def create_session(event):
         "auditor_name": auditor_name,
         "facility_area": facility_area,
         "date_of_audit": date_of_audit,
+        "location": location,
+        "station": station,
         "created_at": created_at,
     })
 
@@ -463,6 +471,8 @@ def create_inspection(event):
         "auditor_name": session.get("auditor_name", ""),
         "facility_area": session.get("facility_area", ""),
         "date_of_audit": session.get("date_of_audit", ""),
+        "location": session.get("location", ""),
+        "station": session.get("station", ""),
         "categories": categories,
         "general_results": general_results if general_results else [],
         "notes": notes,
@@ -509,6 +519,8 @@ def list_inspections(event):
             "auditor_name": item.get("auditor_name"),
             "facility_area": item.get("facility_area"),
             "date_of_audit": item.get("date_of_audit"),
+            "location": item.get("location"),
+            "station": item.get("station"),
             "created_at": item.get("created_at"),
         })
 
@@ -569,6 +581,8 @@ def get_inspection(event):
         "auditor_name": item.get("auditor_name"),
         "facility_area": item.get("facility_area"),
         "date_of_audit": item.get("date_of_audit"),
+        "location": item.get("location"),
+        "station": item.get("station"),
         "categories": categories,
         "general_results": item.get("general_results", []),
         "notes": item.get("notes", ""),
