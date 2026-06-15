@@ -365,6 +365,7 @@ def create_inspection(event):
         "location": session.get("location", ""),
         "facility_area": session.get("facility_area", ""),
         "station": session.get("station", ""),
+        "station_id": session.get("station_id", ""),
         "date_of_audit": session.get("date_of_audit", ""),
         "team": team if team else [],
         "categories": categories,

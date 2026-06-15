@@ -2268,6 +2268,7 @@ def create_inspection(event):
             date_of_audit = str(session.get("date_of_audit", body.get("date_of_audit", ""))).strip()
             location      = str(session.get("location",      body.get("location",      ""))).strip()
             station       = str(session.get("station",       body.get("station",       ""))).strip()
+            station_id    = str(session.get("station_id",    body.get("station_id",    ""))).strip()
             # If session holds an inspection_id and none was provided, use it
             if not inspection_id:
                 inspection_id = str(session.get("inspection_id", "")).strip()
@@ -2278,12 +2279,14 @@ def create_inspection(event):
             date_of_audit = str(body.get("date_of_audit", "")).strip()
             location      = str(body.get("location",      "")).strip()
             station       = str(body.get("station",       "")).strip()
+            station_id    = str(body.get("station_id",    "")).strip()
     else:
         auditor_name  = str(body.get("auditor_name",  "")).strip()
         facility_area = str(body.get("facility_area", "")).strip()
         date_of_audit = str(body.get("date_of_audit", "")).strip()
         location      = str(body.get("location",      "")).strip()
         station       = str(body.get("station",       "")).strip()
+        station_id    = str(body.get("station_id",    "")).strip()
 
     # ─────────────────────────────────────────────
     # FIX 4: Merge with existing inspection instead of always creating new.
@@ -2372,6 +2375,7 @@ def create_inspection(event):
         "date_of_audit":      date_of_audit,
         "location":           location,
         "station":            station,
+        "station_id":         station_id,
         "team":               team if team else [],
         "categories":         categories,
         "general_results":    general_results if general_results else [],

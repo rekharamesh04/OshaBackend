@@ -1107,6 +1107,7 @@ def create_inspection(event):
         location      = str(session.get("location",      body.get("location",      ""))).strip()
         facility_area = str(session.get("facility_area", body.get("facility_area", ""))).strip()
         station       = str(session.get("station",       body.get("station",       ""))).strip()
+        station_id    = str(session.get("station_id",    body.get("station_id",    ""))).strip()
         date_of_audit = str(session.get("date_of_audit", body.get("date_of_audit", ""))).strip()
         if not inspection_id:
             inspection_id = str(session.get("inspection_id", "")).strip()
@@ -1115,6 +1116,7 @@ def create_inspection(event):
         location      = str(body.get("location",      "")).strip()
         facility_area = str(body.get("facility_area", "")).strip()
         station       = str(body.get("station",       "")).strip()
+        station_id    = str(body.get("station_id",    "")).strip()
         date_of_audit = str(body.get("date_of_audit", "")).strip()
 
     existing = load_inspection(inspection_id) if inspection_id else None
@@ -1178,6 +1180,7 @@ def create_inspection(event):
         "location":           location,
         "facility_area":      facility_area,
         "station":            station,
+        "station_id":         station_id,
         "date_of_audit":      date_of_audit,
         "team":               team if team else [],
         "categories":         categories,

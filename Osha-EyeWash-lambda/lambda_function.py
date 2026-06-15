@@ -971,6 +971,7 @@ def create_inspection_from_session_payload(event: dict) -> dict:
         "location": session.get("location", ""),
         "facility_area": session.get("facility_area", ""),
         "station": session.get("station", ""),
+        "station_id": session.get("station_id", ""),
         "date_of_audit": session.get("date_of_audit", ""),
         "team": merged_team, "categories": merged_cats,
         "general_results": merged_results, "notes": merged_notes,

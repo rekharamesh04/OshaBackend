@@ -1534,6 +1534,7 @@ def create_inspection(event):
         "date_of_audit": session.get("date_of_audit", ""),
         "location": session.get("location", ""),
         "station": session.get("station", ""),
+        "station_id": session.get("station_id", ""),
         "team": team if team else [],
         "categories": categories,
         "general_results": general_results if general_results else [],

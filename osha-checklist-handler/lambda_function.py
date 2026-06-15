@@ -317,7 +317,8 @@ def create_session(event):
         "facility_area": "string",
         "date_of_audit": "YYYY-MM-DD",
         "location": "string",          // optional
-        "station": "string"             // optional
+        "station": "string",            // optional — station display name
+        "station_id": "string"          // optional — dashboard station ID for progress tracking
     }
     """
     try:
@@ -331,6 +332,7 @@ def create_session(event):
     date_of_audit = body.get("date_of_audit", "").strip()
     location = body.get("location", "").strip()
     station = body.get("station", "").strip()
+    station_id = body.get("station_id", "").strip()
 
     if not auditor_name:
         return build_response(400, {"error": "auditor_name is required"})
@@ -351,6 +353,7 @@ def create_session(event):
         "date_of_audit": date_of_audit,
         "location": location,
         "station": station,
+        "station_id": station_id,
         "created_at": created_at,
     }
 
@@ -363,6 +366,7 @@ def create_session(event):
         "date_of_audit": date_of_audit,
         "location": location,
         "station": station,
+        "station_id": station_id,
         "created_at": created_at,
     })
 
@@ -473,6 +477,7 @@ def create_inspection(event):
         "date_of_audit": session.get("date_of_audit", ""),
         "location": session.get("location", ""),
         "station": session.get("station", ""),
+        "station_id": session.get("station_id", ""),
         "categories": categories,
         "general_results": general_results if general_results else [],
         "notes": notes,

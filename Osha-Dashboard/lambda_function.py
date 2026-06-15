@@ -1289,6 +1289,312 @@ def delete_station(event):
 
 
 # ═══════════════════════════════════════════════
+# Mapping: Dashboard typeKey → Inspection table label
+# ═══════════════════════════════════════════════
+TYPEKEY_TO_INSPECTION_LABEL = {
+    "eyewash":       "Eyewash",
+    "fire":          "Fire Extinguisher",
+    "exitdoor":      "Exit Door",
+    "racking":       "Monthly Racking",
+    "hra":           "Quarterly HRA",
+    "recordkeeping": "Recordkeeping",
+}
+
+
+# ═══════════════════════════════════════════════
+# Mobile API: GET /api/mobile/inspection-status
+# ═══════════════════════════════════════════════
+def mobile_inspection_status(event):
+    """
+    Returns today's inspection workload for a specific location, grouped by
+    category, with per-station completion status and a progress summary.
+
+    Powers the mobile app's "inspection home screen."
+
+    Query Parameters:
+        location_key   (required) — Which location (e.g. "austin-tx")
+        category       (optional) — Filter to a single category typeKey
+        auditor_name   (optional) — Filter progress to a specific inspector
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    try:
+        params = event.get("queryStringParameters", {}) or {}
+        location_key = str(params.get("location_key", "") or "").strip()
+        filter_category = str(params.get("category", "") or "").strip()
+        filter_auditor = str(params.get("auditor_name", "") or "").strip()
+
+        if not location_key:
+            return build_response(400, {"error": "location_key query parameter is required"})
+
+        # Validate category if provided
+        valid_type_keys = {st["key"] for st in STATION_TYPES}
+        if filter_category and filter_category not in valid_type_keys:
+            return build_response(400, {
+                "error": f"Invalid category '{filter_category}'. Must be one of: {', '.join(sorted(valid_type_keys))}"
+            })
+
+        # ── Step 1: Get all stations under this location from dashboard table ──
+        all_dashboard_items = scan_full_table(dashboard_table)
+        all_dashboard_items = convert_decimals(all_dashboard_items)
+
+        # Find the location name (from COMPANY#/LOCATION# record)
+        location_name = ""
+        location_found = False
+        for item in all_dashboard_items:
+            pk = item.get("PK", "")
+            sk = item.get("SK", "")
+            if sk == f"LOCATION#{location_key}" and pk.startswith("COMPANY#"):
+                location_name = item.get("name", location_key)
+                location_found = True
+                break
+
+        if not location_found:
+            return build_response(404, {"error": f"Location '{location_key}' not found"})
+
+        # Collect all stations under this location
+        location_stations = []
+        for item in all_dashboard_items:
+            pk = item.get("PK", "")
+            sk = item.get("SK", "")
+            if pk == f"LOCATION#{location_key}" and sk.startswith("STATION#"):
+                type_key = item.get("typeKey", "")
+                # Apply category filter if specified
+                if filter_category and type_key != filter_category:
+                    continue
+                location_stations.append({
+                    "station_id": item.get("station_id", sk.replace("STATION#", "")),
+                    "station_name": item.get("name", ""),
+                    "type_key": type_key,
+                    "next_due": item.get("nextDue", ""),
+                })
+
+        logger.info(f"[MOBILE] Location '{location_key}': {len(location_stations)} stations found")
+
+        # ── Step 2: Scan inspections from all 6 tables in PARALLEL ──
+        # Determine current month range for filtering
+        today = datetime.now(timezone.utc)
+        current_month_start = today.strftime("%Y-%m-01")
+        # Last day of current month
+        if today.month == 12:
+            next_month_start = f"{today.year + 1}-01-01"
+        else:
+            next_month_start = f"{today.year}-{today.month + 1:02d}-01"
+
+        all_inspections = []
+
+        def _scan_inspection_table(type_label, ddb_table):
+            """Scan a single inspection table and return matching records."""
+            try:
+                items = convert_decimals(scan_full_table(ddb_table))
+                return [(item, type_label) for item in items]
+            except Exception as e:
+                logger.error(f"[MOBILE] Error scanning {type_label}: {str(e)}")
+                return []
+
+        # Only scan tables for the categories we need
+        tables_to_scan = {}
+        if filter_category:
+            label = TYPEKEY_TO_INSPECTION_LABEL.get(filter_category)
+            if label and label in inspection_tables:
+                tables_to_scan[label] = inspection_tables[label]
+        else:
+            tables_to_scan = inspection_tables
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = {
+                executor.submit(_scan_inspection_table, label, tbl): label
+                for label, tbl in tables_to_scan.items()
+            }
+            for future in as_completed(futures):
+                all_inspections.extend(future.result())
+
+        logger.info(f"[MOBILE] Total inspections scanned: {len(all_inspections)}")
+
+        # ── Step 3: Build station_id → inspection mapping for this month ──
+        # An inspection matches a station if:
+        #   (a) station_id field matches (preferred, new flow), OR
+        #   (b) station name matches (fallback, legacy flow)
+        # AND the inspection is within the current month
+        # AND (if auditor_name filter) the auditor matches
+
+        station_id_set = {s["station_id"] for s in location_stations}
+        station_name_set = {s["station_name"].lower() for s in location_stations}
+
+        # Map: station_id → best matching inspection record
+        station_inspection_map = {}  # station_id → {inspection_id, status, created_at, completed_at}
+
+        for raw, type_label in all_inspections:
+            try:
+                date_of_audit = str(raw.get("date_of_audit") or "")
+                # Filter to current month
+                if date_of_audit < current_month_start or date_of_audit >= next_month_start:
+                    continue
+
+                # Filter by auditor if specified
+                if filter_auditor:
+                    auditor = str(raw.get("auditor_name") or "").strip()
+                    if filter_auditor.lower() != auditor.lower():
+                        continue
+
+                # Filter by location — match against location or facility_area
+                insp_location = str(raw.get("location") or "").strip()
+                insp_facility = str(raw.get("facility_area") or "").strip()
+                location_match = (
+                    location_name.lower() in (insp_location.lower(), insp_facility.lower())
+                    if location_name else False
+                )
+                if not location_match:
+                    continue
+
+                # Try to match by station_id first, then by station name
+                insp_station_id = str(raw.get("station_id") or "").strip()
+                insp_station_name = str(raw.get("station") or "").strip()
+
+                matched_station_id = None
+                if insp_station_id and insp_station_id in station_id_set:
+                    matched_station_id = insp_station_id
+                elif insp_station_name:
+                    # Fallback: match by station name against our station list
+                    for s in location_stations:
+                        if s["station_name"].lower() == insp_station_name.lower():
+                            matched_station_id = s["station_id"]
+                            break
+
+                if not matched_station_id:
+                    continue
+
+                # Compute status
+                categories = raw.get("categories") or []
+                general_results = raw.get("general_results") or []
+                stored_status = str(raw.get("status") or "").strip()
+
+                if stored_status in ("paused", "in_progress"):
+                    status = "started"
+                else:
+                    computed = compute_inspection_status(categories, general_results)
+                    if computed == "completed":
+                        status = "completed"
+                    elif computed == "in_progress":
+                        status = "started"
+                    else:
+                        status = "started"  # Record exists but no answers = started
+
+                created_at = str(raw.get("created_at") or "")
+                completed_at = str(raw.get("completed_at") or "") if raw.get("completed_at") else None
+
+                # If status is completed but no completed_at, use created_at as fallback
+                if status == "completed" and not completed_at:
+                    completed_at = created_at
+
+                inspection_id = str(raw.get("inspection_id") or "")
+
+                # Keep the most recent inspection if multiple exist
+                existing = station_inspection_map.get(matched_station_id)
+                if not existing or created_at > existing.get("started_at", ""):
+                    station_inspection_map[matched_station_id] = {
+                        "inspection_id": inspection_id,
+                        "status": status,
+                        "started_at": created_at,
+                        "completed_at": completed_at,
+                    }
+            except Exception as e:
+                logger.error(f"[MOBILE] Error matching inspection: {str(e)}")
+                continue
+
+        # ── Step 4: Build grouped response ──
+        # Group stations by typeKey (category)
+        categories_map = {}  # typeKey → list of station dicts
+        for station in location_stations:
+            tk = station["type_key"]
+            if tk not in categories_map:
+                categories_map[tk] = []
+
+            sid = station["station_id"]
+            insp = station_inspection_map.get(sid)
+
+            if insp:
+                station_entry = {
+                    "station_id": sid,
+                    "station_name": station["station_name"],
+                    "status": insp["status"],
+                    "inspection_id": insp["inspection_id"],
+                    "started_at": insp["started_at"],
+                    "completed_at": insp["completed_at"],
+                }
+            else:
+                station_entry = {
+                    "station_id": sid,
+                    "station_name": station["station_name"],
+                    "status": "pending",
+                    "inspection_id": None,
+                    "started_at": None,
+                    "completed_at": None,
+                }
+
+            categories_map[tk].append(station_entry)
+
+        # Build the categories array in the fixed STATION_TYPES order
+        categories_response = []
+        total_all = 0
+        completed_all = 0
+        started_all = 0
+        pending_all = 0
+
+        for st_type in STATION_TYPES:
+            tk = st_type["key"]
+            # Skip if category filter is active and this isn't the filtered category
+            if filter_category and tk != filter_category:
+                continue
+
+            stations_list = categories_map.get(tk, [])
+            cat_completed = sum(1 for s in stations_list if s["status"] == "completed")
+            cat_started = sum(1 for s in stations_list if s["status"] == "started")
+            cat_pending = sum(1 for s in stations_list if s["status"] == "pending")
+            cat_total = len(stations_list)
+
+            total_all += cat_total
+            completed_all += cat_completed
+            started_all += cat_started
+            pending_all += cat_pending
+
+            categories_response.append({
+                "category_key": tk,
+                "category_name": st_type["label"],
+                "counts": {
+                    "total": cat_total,
+                    "completed": cat_completed,
+                    "started": cat_started,
+                    "pending": cat_pending,
+                },
+                "stations": stations_list,
+            })
+
+        # Build summary
+        percent_complete = round((completed_all / total_all * 100)) if total_all > 0 else 0
+
+        response = {
+            "location_key": location_key,
+            "location_name": location_name,
+            "date": today.strftime("%Y-%m-%d"),
+            "summary": {
+                "total": total_all,
+                "completed": completed_all,
+                "started": started_all,
+                "pending": pending_all,
+                "percent_complete": percent_complete,
+            },
+            "categories": categories_response,
+        }
+
+        return build_response(200, response)
+
+    except Exception as e:
+        logger.exception(f"[MOBILE] mobile_inspection_status failed: {str(e)}")
+        return build_response(500, {"error": f"Internal error: {str(e)}"})
+
+
+# ═══════════════════════════════════════════════
 # Main Handler — Routes to correct function
 # ═══════════════════════════════════════════════
 def lambda_handler(event, context):
@@ -1371,6 +1677,14 @@ def lambda_handler(event, context):
         # ── GET /api/alerts ──
         elif http_method == "GET" and resource == "/api/alerts":
             return get_alerts(event)
+
+        # ── GET /api/mobile/inspection-status ──
+        elif http_method == "GET" and (
+            resource == "/api/mobile/inspection-status"
+            or path.rstrip("/").endswith("/api/mobile/inspection-status")
+        ):
+            logger.info("[MOBILE] Entering mobile_inspection_status")
+            return mobile_inspection_status(event)
 
         # ── GET /api/inspections (was /admin/inspections) ──
         elif http_method == "GET" and (
