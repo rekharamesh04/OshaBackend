@@ -1367,19 +1367,16 @@ def mobile_inspection_status(event):
                     "station_name": item.get("name", ""),
                     "type_key": type_key,
                     "next_due": item.get("nextDue", ""),
+                    "equipment_status": item.get("status", "ok"),
+                    "lastInspected": item.get("lastInspected", ""),
                 })
 
         logger.info(f"[MOBILE] Location '{location_key}': {len(location_stations)} stations found")
 
         # ── Step 2: Scan inspections from all 6 tables in PARALLEL ──
-        # Determine current month range for filtering
+        # Determine today's date for filtering (daily scope per frontend requirement)
         today = datetime.now(timezone.utc)
-        current_month_start = today.strftime("%Y-%m-01")
-        # Last day of current month
-        if today.month == 12:
-            next_month_start = f"{today.year + 1}-01-01"
-        else:
-            next_month_start = f"{today.year}-{today.month + 1:02d}-01"
+        today_str = today.strftime("%Y-%m-%d")
 
         all_inspections = []
 
@@ -1411,11 +1408,11 @@ def mobile_inspection_status(event):
 
         logger.info(f"[MOBILE] Total inspections scanned: {len(all_inspections)}")
 
-        # ── Step 3: Build station_id → inspection mapping for this month ──
+        # ── Step 3: Build station_id → inspection mapping for today ──
         # An inspection matches a station if:
         #   (a) station_id field matches (preferred, new flow), OR
         #   (b) station name matches (fallback, legacy flow)
-        # AND the inspection is within the current month
+        # AND the inspection date_of_audit is today
         # AND (if auditor_name filter) the auditor matches
 
         station_id_set = {s["station_id"] for s in location_stations}
@@ -1427,8 +1424,8 @@ def mobile_inspection_status(event):
         for raw, type_label in all_inspections:
             try:
                 date_of_audit = str(raw.get("date_of_audit") or "")
-                # Filter to current month
-                if date_of_audit < current_month_start or date_of_audit >= next_month_start:
+                # Filter to today's date
+                if date_of_audit != today_str:
                     continue
 
                 # Filter by auditor if specified
@@ -1518,6 +1515,9 @@ def mobile_inspection_status(event):
                     "station_id": sid,
                     "station_name": station["station_name"],
                     "status": insp["status"],
+                    "equipment_status": station.get("equipment_status", "ok"),
+                    "lastInspected": station.get("lastInspected", ""),
+                    "nextDue": station.get("next_due", ""),
                     "inspection_id": insp["inspection_id"],
                     "started_at": insp["started_at"],
                     "completed_at": insp["completed_at"],
@@ -1527,6 +1527,9 @@ def mobile_inspection_status(event):
                     "station_id": sid,
                     "station_name": station["station_name"],
                     "status": "pending",
+                    "equipment_status": station.get("equipment_status", "ok"),
+                    "lastInspected": station.get("lastInspected", ""),
+                    "nextDue": station.get("next_due", ""),
                     "inspection_id": None,
                     "started_at": None,
                     "completed_at": None,
