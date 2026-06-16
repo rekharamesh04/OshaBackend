@@ -342,14 +342,34 @@ CHECKLIST_VISUAL_RULES = {
         "N/A if the exit door itself is already clearly visible in the image (no direction sign needed)."
     ),
     "13": (
-        "RULE — 'NOT AN EXIT' LABELS ON MISLEADING DOORS:\n\n"
-        "IMPORTANT: This item is N/A if no non-exit doors are visible that could be confused for exits.\n\n"
-        "PASS if:\n"
-        "  1. Any door visible in the image that is NOT an exit is clearly labeled 'NOT AN EXIT',\n"
-        "     'CLOSET', 'STOREROOM', 'BREAKROOM', or similar indicating it is not an exit.\n\n"
+        "RULE — 'NOT AN EXIT' LABELS ON NON-EXIT DOORS:\n\n"
+        "CLASSIFICATION LOGIC — Determine the door type first:\n"
+        "  • If the door has an 'EMERGENCY EXIT', 'EXIT', or 'FIRE EXIT' label/sign → it IS a fire exit door.\n"
+        "    This check does NOT apply to fire exit doors. Mark as N/A.\n"
+        "  • If the door does NOT have any 'EMERGENCY EXIT', 'EXIT', or 'FIRE EXIT' label/sign\n"
+        "    → it is a NON-EXIT door (e.g., washroom, office, water closet, closet, breakroom).\n"
+        "    Proceed to evaluate below.\n\n"
+        "PASS if ALL of the following are true:\n"
+        "  1. A door is visible in the image that does NOT have an 'Emergency Exit' or 'EXIT' label.\n"
+        "  2. That non-exit door IS clearly labeled with one of the following:\n"
+        "     - 'NOT AN EXIT' or 'NOT EXIT'\n"
+        "     - A descriptive label indicating its actual use (e.g., 'CLOSET', 'STOREROOM',\n"
+        "       'BREAKROOM', 'WASHROOM', 'RESTROOM', 'OFFICE', 'WATER CLOSET', 'STORAGE',\n"
+        "       'MECHANICAL ROOM', 'ELECTRICAL ROOM', 'JANITOR', or similar).\n"
+        "  3. The label is clearly readable in the image.\n\n"
         "FAIL if:\n"
-        "  - A non-exit door is present that has NO labeling and could be mistaken for an exit.\n\n"
-        "N/A if only clearly designated exit doors are visible (no potentially misleading doors present)."
+        "  - A door is visible that does NOT have an 'Emergency Exit' / 'EXIT' label\n"
+        "    AND also does NOT have a 'Not an Exit' label or any descriptive label identifying\n"
+        "    its actual use.\n"
+        "  - In other words: a non-exit door exists that could easily be mistaken for an exit\n"
+        "    because it has NO labeling at all.\n\n"
+        "N/A if:\n"
+        "  - The door in the image IS clearly labeled 'EMERGENCY EXIT', 'EXIT', or 'FIRE EXIT'\n"
+        "    (it is a fire exit, so this 'Not an Exit' check does not apply).\n"
+        "  - No doors are visible in the image.\n\n"
+        "SUMMARY: Read the label on the door. If it says Emergency Exit / EXIT → N/A.\n"
+        "If it has no Emergency Exit label but has a 'Not an Exit' or descriptive label → PASS.\n"
+        "If it has no Emergency Exit label AND no 'Not an Exit' or descriptive label → FAIL."
     ),
     # ── Section 4 ──────────────────────────────────────────────────────────
     "14": (
@@ -412,7 +432,7 @@ VALIDATION_KEYWORDS = {
     "10": ["exit", "sign", "letter", "size", "large", "small", "inch", "stroke"],
     "11": ["exit", "sign", "light", "lit", "illuminat", "glow", "dark"],
     "12": ["exit", "sign", "arrow", "direction", "corridor", "hallway", "pointing"],
-    "13": ["not an exit", "closet", "storeroom", "breakroom", "door", "label", "sign"],
+    "13": ["not an exit", "not exit", "closet", "storeroom", "breakroom", "washroom", "restroom", "office", "water closet", "storage", "mechanical", "electrical", "janitor", "emergency exit", "fire exit", "exit", "door", "label", "sign", "no label", "unlabeled"],
     "14": ["outside", "exterior", "door", "discharge", "outdoor", "street", "walkway"],
     "15": ["hazard", "chemical", "flammable", "gas", "cylinder", "drum", "machinery", "danger", "warning", "storage", "cabinet", "furnace", "boiler"],
     "17": ["barrier", "bollard", "guardrail", "vehicle", "traffic", "alley", "driveway"],
@@ -811,7 +831,7 @@ def item_zoom_hint(item_id: str) -> str:
         "10": "Zoom in on the EXIT sign letters. Fill most of the frame with the sign face.",
         "11": "Show the EXIT sign clearly in the photo. Ensure lighting condition is apparent.",
         "12": "Show the corridor/hallway pointing toward the exit. Include any directional signs.",
-        "13": "Show the non-exit door clearly. Include any label or sign on the door.",
+        "13": "Show the full door and any labels/signs on it. If the door has an Emergency Exit label, capture it. If it has a 'Not an Exit' or other label (e.g., Closet, Washroom), make sure the label is readable.",
         "14": "Show the exit door open or from outside to confirm it leads outdoors.",
         "15": "Photograph the full length of the exit corridor from floor to ceiling. Capture walls, floor, and any equipment or storage visible along the route.",
         "17": "Show the exterior door area including any barriers or the driveway/alley nearby.",
@@ -1702,18 +1722,38 @@ def _analyze_single_item_bedrock(
     item_db_id   = checklist_item.get("id", item_id)
     item_desc    = checklist_item.get("description") or checklist_item.get("desc") or f"Checklist item {item_id}"
 
-    prompt = (
-        f"Checklist item to inspect:\n"
-        f"- item_id: {item_db_id}\n"
-        f"- item_description: {item_desc}\n"
-        f"- ai_analyzable: {ai_flag}\n"
-        f"- strict_visual_rule: {rule}\n\n"
-        f"STEP 1: Is a physical exit door or exit route element clearly and unambiguously visible?\n"
-        f"STEP 2: If yes, does the image clearly satisfy the strict_visual_rule above?\n"
-        f"Do not approve just because a door is present.\n"
-        f"Do not guess. If the required condition is not clearly visible, fail.\n"
-        f"Return JSON only."
-    )
+    # Item 13 is special: inspector photographs NON-exit doors to verify labeling
+    if str(item_id) == "13":
+        prompt = (
+            f"Checklist item to inspect:\n"
+            f"- item_id: {item_db_id}\n"
+            f"- item_description: {item_desc}\n"
+            f"- ai_analyzable: {ai_flag}\n"
+            f"- strict_visual_rule: {rule}\n\n"
+            f"STEP 1: Is a door clearly visible in the image?\n"
+            f"STEP 2: Read ANY labels/signs on the door. Classify the door:\n"
+            f"  - If the door has 'EMERGENCY EXIT', 'EXIT', or 'FIRE EXIT' label → object_detected='exit_door'\n"
+            f"  - If the door does NOT have an exit label → object_detected='non_exit_door'\n"
+            f"  - If no door is visible → object_detected='other'\n"
+            f"STEP 3: Based on the classification, apply the strict_visual_rule above.\n"
+            f"  - For exit doors: this check is N/A (pass=true, condition_checked='n/a_fire_exit_door').\n"
+            f"  - For non-exit doors: check if a 'Not an Exit' or descriptive label is present.\n"
+            f"Do not guess. If the label is not clearly visible, fail.\n"
+            f"Return JSON only."
+        )
+    else:
+        prompt = (
+            f"Checklist item to inspect:\n"
+            f"- item_id: {item_db_id}\n"
+            f"- item_description: {item_desc}\n"
+            f"- ai_analyzable: {ai_flag}\n"
+            f"- strict_visual_rule: {rule}\n\n"
+            f"STEP 1: Is a physical exit door or exit route element clearly and unambiguously visible?\n"
+            f"STEP 2: If yes, does the image clearly satisfy the strict_visual_rule above?\n"
+            f"Do not approve just because a door is present.\n"
+            f"Do not guess. If the required condition is not clearly visible, fail.\n"
+            f"Return JSON only."
+        )
     return invoke_claude_json(
         system_prompt=IMAGE_ANALYSIS_SYSTEM_PROMPT,
         user_text=prompt,
@@ -1839,7 +1879,11 @@ def analyze_item_image(event, _is_async=False):
         suggested_action = str(suggested_action).strip() or None
 
     # Hard safety guard: pass requires exit_door detection
-    if passed and object_detected != "exit_door":
+    # EXCEPTION: Item 13 ("NOT AN EXIT Labels") — the inspector photographs NON-exit doors
+    # (washroom, office, closet, etc.) to verify they have proper "Not an Exit" labeling.
+    # For item 13, any door detection (exit_door, door, non_exit_door) is valid.
+    _is_item_13 = str(item_id) == "13"
+    if passed and object_detected != "exit_door" and not _is_item_13:
         expected_kw  = expected_keywords_for_item(item_id)
         lower_reason = reason.lower()
         if not (expected_kw and any(kw in lower_reason for kw in expected_kw)):
@@ -1852,7 +1896,11 @@ def analyze_item_image(event, _is_async=False):
             reason           = "Object in image is not an exit door."
             suggested_action = "Point camera directly at the exit door and retake."
 
-    wrong_image = object_detected != "exit_door"
+    # For item 13, a non-exit door IS the expected subject — don't flag as wrong_image
+    if _is_item_13:
+        wrong_image = object_detected not in ("exit_door", "door", "non_exit_door")
+    else:
+        wrong_image = object_detected != "exit_door"
 
     if object_detected == "exit_door" and confidence < IMAGE_CONFIDENCE_BLOCK_THRESHOLD:
         object_detected  = "unclear"
