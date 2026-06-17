@@ -1510,13 +1510,25 @@ def mobile_inspection_status(event):
             sid = station["station_id"]
             insp = station_inspection_map.get(sid)
 
+            # Derive equipment_status: if inspection is completed today,
+            # override the stored dashboard status to "ok" + update lastInspected
+            stored_eq_status = station.get("equipment_status", "ok")
+            stored_last_inspected = station.get("lastInspected", "")
+
+            if insp and insp["status"] == "completed":
+                derived_eq_status = "ok"
+                derived_last_inspected = today_str
+            else:
+                derived_eq_status = stored_eq_status
+                derived_last_inspected = stored_last_inspected
+
             if insp:
                 station_entry = {
                     "station_id": sid,
                     "station_name": station["station_name"],
                     "status": insp["status"],
-                    "equipment_status": station.get("equipment_status", "ok"),
-                    "lastInspected": station.get("lastInspected", ""),
+                    "equipment_status": derived_eq_status,
+                    "lastInspected": derived_last_inspected,
                     "nextDue": station.get("next_due", ""),
                     "inspection_id": insp["inspection_id"],
                     "started_at": insp["started_at"],
@@ -1527,8 +1539,8 @@ def mobile_inspection_status(event):
                     "station_id": sid,
                     "station_name": station["station_name"],
                     "status": "pending",
-                    "equipment_status": station.get("equipment_status", "ok"),
-                    "lastInspected": station.get("lastInspected", ""),
+                    "equipment_status": stored_eq_status,
+                    "lastInspected": stored_last_inspected,
                     "nextDue": station.get("next_due", ""),
                     "inspection_id": None,
                     "started_at": None,
