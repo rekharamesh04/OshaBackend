@@ -626,7 +626,10 @@ CHECKLIST_VISUAL_RULES = {
         "  - No label is visible on the extinguisher body."
     ),
     "10": (
-        "RULE — INSPECTION TAG ATTACHED AND DATED (2025 OR LATER):\n"
+        "RULE — INSPECTION TAG FRONT SIDE — YEAR GRID AND DATE VERIFICATION (2025 OR LATER):\n"
+        "\n"
+        "NOTE: This is the FRONT side of the tag. The worker will also capture the BACK side separately.\n"
+        "For this image, focus on: year grid, service date, tag attachment, and tag type.\n"
         "\n"
         "PASS if ALL of the following are true:\n"
         "  1. An inspection tag or service card is physically ATTACHED to the extinguisher.\n"
@@ -725,6 +728,51 @@ CHECKLIST_VISUAL_RULES = {
         "\n"
         "DEFAULT: When in doubt on a professional service card with filled fields → PASS."
     ),
+    "10_back": (
+        "RULE — INSPECTION TAG BACK SIDE — INSPECTOR DETAILS VERIFICATION:\n"
+        "\n"
+        "NOTE: This is the BACK side of the inspection tag. The front side (year grid)\n"
+        "has already been captured separately. For this image, focus on: inspector identity\n"
+        "and inspection details recorded on the back of the tag.\n"
+        "\n"
+        "════════════════════════════════════════════════\n"
+        "WHAT TO LOOK FOR ON THE BACK\n"
+        "════════════════════════════════════════════════\n"
+        "\n"
+        "The back of the inspection tag typically shows WHO inspected the extinguisher.\n"
+        "Look for any combination of the following:\n"
+        "\n"
+        "  1. INSPECTOR NAME or INITIALS — handwritten or printed name/initials\n"
+        "     of the person who performed the monthly inspection.\n"
+        "  2. INSPECTION DATE — month/year or full date of the last inspection.\n"
+        "     This may appear as handwritten text, a punched month, or a stamped date.\n"
+        "  3. COMPANY/SERVICER INFO — name of the inspection company,\n"
+        "     license number, or technician ID.\n"
+        "  4. MONTHLY GRID (back side) — some tags have a month-by-month grid\n"
+        "     on the back where inspectors initial or punch each month.\n"
+        "\n"
+        "════════════════════════════════════════════════\n"
+        "PASS / FAIL DECISION\n"
+        "════════════════════════════════════════════════\n"
+        "\n"
+        "PASS if:\n"
+        "  The back of the tag is visible AND at least ONE of the following:\n"
+        "  (a) Inspector name or initials are present (handwritten or printed)\n"
+        "  (b) An inspection date from 2025 or later is visible\n"
+        "  (c) A monthly grid shows marks (initials, holes, ticks) for recent months\n"
+        "  (d) Company/servicer information is legible\n"
+        "\n"
+        "FAIL if:\n"
+        "  - The back of the tag is blank (no inspector info at all)\n"
+        "  - The back is completely illegible, smeared, torn, or damaged\n"
+        "  - No tag back is visible in the image\n"
+        "  - The image shows the front side again instead of the back\n"
+        "\n"
+        "NOTE: The back side is typically less formal than the front. Even minimal\n"
+        "handwritten initials count as valid inspector identification.\n"
+        "\n"
+        "DEFAULT: When initials or any inspector mark is present → PASS."
+    ),
 }
 
 # ─────────────────────────────────────────────
@@ -750,6 +798,7 @@ VALIDATION_KEYWORDS = {
     "8": [],
     "9": [],
     "10": [],
+    "10_back": [],
 }
 
 # ─────────────────────────────────────────────
@@ -912,17 +961,19 @@ Rules:
     - item 7: nozzle or hose must be visible and not blocked, covered, clogged, or obstructed.
     - item 8: pressure gauge must be visible and needle should be in the green zone.
     - item 9: instruction label must be visible, properly aligned, facing outward, and readable.
-    - item 10: inspection tag must be present, attached, clean enough to read, and not torn or missing.
+    - item 10: inspection tag must be photographed from BOTH SIDES (front showing date, back showing inspector name). Two separate photos required.
     Keep the reply short and practical.
 """
 
-def voice_item_hint(item_id: str) -> str:
+def voice_item_hint(item_id: str, image_side: str = "") -> str:
     hints = {
         "7": "Check nozzle and hose. If blocked, covered, clogged, or obstructed, retake after clearing it.",
         "8": "Check pressure gauge. Keep needle visible and in the green zone.",
         "9": "Check instruction label. Keep it aligned, facing outward, and readable.",
-        "10": "Check inspection tag. Keep it present, attached, clean, and readable; replace if torn or missing.",
+        "10": "Check inspection tag. First, capture the FRONT of the tag showing the year and date. Then flip and capture the BACK showing the inspector name or initials.",
     }
+    if str(item_id) == "10" and image_side == "back":
+        return "Now capture the BACK of the inspection tag. Show the inspector name, initials, or monthly grid."
     return hints.get(str(item_id), "")
 
 # ═══════════════════════════════════════════════════════════════
@@ -1385,8 +1436,12 @@ def merge_categories(existing_cats, incoming_cats):
 # AI HELPER FUNCTIONS
 # ═══════════════════════════════════════════════════════════════
 
-def checklist_rule_for_item(item_id: str, checklist_item: dict) -> str:
-    return CHECKLIST_VISUAL_RULES.get(str(item_id), checklist_item.get("description", ""))
+def checklist_rule_for_item(item_id: str, checklist_item: dict, image_side: str = "") -> str:
+    """Return the visual rule for the given item. For item 10, supports front/back."""
+    effective_key = str(item_id)
+    if effective_key == "10" and image_side == "back":
+        effective_key = "10_back"
+    return CHECKLIST_VISUAL_RULES.get(effective_key, checklist_item.get("description", ""))
 
 
 def expected_keywords_for_item(item_id: str) -> List[str]:
@@ -1403,13 +1458,15 @@ def required_yolo_class_for_item(item_id: str) -> Optional[str]:
     return None
 
 
-def item_zoom_hint(item_id: str) -> str:
+def item_zoom_hint(item_id: str, image_side: str = "") -> str:
     hints = {
         "7": "Show the full extinguisher with hose attached and nozzle tip clearly visible.",
         "8": "Zoom in on the pressure gauge. Keep the full gauge face and needle visible.",
         "9": "Zoom in on the instruction label. Keep label text facing camera, sharp, and readable.",
-        "10": "Zoom in on the inspection tag. Keep date, initials, and tag edges visible and readable.",
+        "10": "Zoom in on the FRONT of the inspection tag. Keep year grid, date, and tag edges visible.",
     }
+    if str(item_id) == "10" and image_side == "back":
+        return "Flip the tag and zoom in on the BACK. Show inspector name, initials, or monthly grid."
     return hints.get(str(item_id), "")
 
 
@@ -1668,7 +1725,49 @@ def component_check_contract(item_id: str) -> str:
             "  Tag only has marks through 2024, no professional fields → pass=false\n"
             "  No tag visible → pass=false\n"
         ),
+        "10_back": (
+            "Return checks with EXACTLY these fields and ONLY these enum values.\n\n"
+            "NOTE: This is the BACK side of the inspection tag.\n"
+            "The front side (year grid) has already been captured separately.\n\n"
+            "══ FIELDS ══\n\n"
+            "  target_visible: true|false\n"
+            "    true  = The back of an inspection tag is visible in the image.\n"
+            "    false = No tag back visible, or front side shown again.\n\n"
+            "  inspector_info_present: yes|no|unclear\n"
+            "    yes     = At least ONE of: inspector name/initials, inspection date,\n"
+            "              company/servicer info, or monthly grid with marks is visible.\n"
+            "    no      = Tag back is completely blank with no inspector info at all.\n"
+            "    unclear = Tag back is too blurry/damaged to determine.\n\n"
+            "  inspector_name_or_initials: present|absent|unclear\n"
+            "    present = Handwritten or printed name/initials of inspector visible.\n"
+            "    absent  = No name or initials visible on back.\n"
+            "    unclear = Cannot determine due to image quality.\n\n"
+            "  inspection_date_visible: yes|no|unclear\n"
+            "    yes = A date (month/year or full date) from 2025 or later is visible.\n"
+            "    no  = No date visible, or date is from before 2025.\n"
+            "    unclear = Date field is present but illegible.\n\n"
+            "  back_readability: readable|illegible|unclear\n"
+            "    readable  = Can identify at least some inspector information.\n"
+            "    illegible = Back is smeared, torn, or too damaged to read.\n"
+            "    unclear   = Cannot determine.\n\n"
+            "PASS RULE:\n"
+            "  target_visible=true AND inspector_info_present=yes\n"
+            "  AND back_readability=readable\n"
+            "  → pass=true.\n\n"
+            "EXAMPLES:\n"
+            "  Handwritten initials 'JD' on back → pass=true\n"
+            "  Inspection date '02/2025' written on back → pass=true\n"
+            "  Monthly grid with initials in recent months → pass=true\n"
+            "  Company name stamped on back → pass=true\n"
+            "  Completely blank back → pass=false\n"
+            "  Front side shown again instead of back → pass=false\n"
+        ),
     }
+    
+    # Support "10_back" as a contract lookup key (for when image_side="back")
+    if str(item_id) == "10_back":
+        return contracts.get("10_back", contracts.get("10", "Return checks object for requested component with explicit enum states."))
+    
     return contracts.get(str(item_id), "Return checks object for requested component with explicit enum states.")
 
 
@@ -1923,8 +2022,46 @@ def enforce_component_checks(
         analysis["pass"] = True
         return True, (condition_checked or "label_outward_and_readable"), reason, worker_message, suggested_action
 
-    # ── Item 10: Inspection Tag ────────────────────────────────────────────
+    # ── Item 10: Inspection Tag (with front/back support) ──────────────────
     if item == "10":
+        # Determine if this is front or back analysis
+        _image_side = str(analysis.get("_image_side", "front")).strip().lower()
+        
+        if _image_side == "back":
+            # ── Back side enforcement ──────────────────────────────────────
+            tag_side_shown = _state("tag_side_shown")
+            inspector_info = _bool("inspector_info_present")
+            back_legibility = _state("back_legibility")
+            
+            # If they captured the front side again, ask for the back
+            if tag_side_shown == "front":
+                return force_fail(
+                    "wrong_side_captured",
+                    reason or "Image shows the FRONT of the tag again. Need the BACK side.",
+                    "Flip the tag over and capture the BACK side.",
+                    "Flip the tag and retake showing the back with inspector details.",
+                )
+            
+            fail_conditions = []
+            if inspector_info is not True:
+                fail_conditions.append("no inspector name, initials, or identification visible on back")
+            if back_legibility not in ("readable", ""):
+                fail_conditions.append(f"back legibility: {back_legibility}")
+            
+            if fail_conditions:
+                detail = "; ".join(fail_conditions)
+                if "inspector" in detail or "initials" in detail:
+                    msg = "No inspector info on tag back. Add inspector details and retake."
+                    action = "Back of tag must show inspector name or initials. Retake if blank."
+                else:
+                    msg = "Tag back is not readable. Clean or replace tag and retake."
+                    action = "Ensure back of tag is legible with inspector details visible."
+                return force_fail("tag_back_failed", reason or f"Tag back verification failed: {detail}.", msg, action)
+            
+            analysis["pass"] = True
+            return True, (condition_checked or "tag_back_inspector_verified"), reason, worker_message, suggested_action
+        
+        # ── Front side enforcement (original logic) ───────────────────────
         tag_physically_attached = _state("tag_physically_attached")
         recent_year_visible     = _state("recent_year_visible")
         year_identified         = _state("year_identified")
@@ -1942,7 +2079,7 @@ def enforce_component_checks(
                     pass
             if not confirmed_old_year:
                 analysis["pass"] = True
-                return True, (condition_checked or "tag_attached_completed_service_card"), reason, worker_message, suggested_action
+                return True, (condition_checked or "tag_front_attached_completed_service_card"), reason, worker_message, suggested_action
 
         fail_conditions = []
         if tag_physically_attached != "attached":
@@ -1971,10 +2108,39 @@ def enforce_component_checks(
             else:
                 msg    = "Inspection tag failed condition check. Fix and retake."
                 action = "Replace or update inspection tag with current signed monthly details."
-            return force_fail("tag_failed", reason or f"Inspection tag failed: {detail}.", msg, action)
+            return force_fail("tag_front_failed", reason or f"Inspection tag front failed: {detail}.", msg, action)
 
         analysis["pass"] = True
-        return True, (condition_checked or "tag_attached_legible_dated_initialed"), reason, worker_message, suggested_action
+        return True, (condition_checked or "tag_front_attached_legible_dated"), reason, worker_message, suggested_action
+
+    # ── Item 10_back: Inspection Tag Back Side (legacy support) ────────────
+    # Note: This is kept for backward compatibility if item_id="10_back" is explicitly passed
+    # The preferred approach is to use item_id="10" with image_side="back" parameter
+    if item == "10_back":
+        inspector_info_present = _state("inspector_info_present")
+        back_readability       = _state("back_readability")
+
+        fail_conditions = []
+        if inspector_info_present != "yes" and inspector_info_present is not True:
+            fail_conditions.append("no inspector information visible on tag back")
+        if back_readability not in ("readable", ""):
+            fail_conditions.append(f"back readability: {back_readability}")
+
+        if fail_conditions:
+            detail = "; ".join(fail_conditions)
+            if "no inspector information" in detail:
+                msg    = "Tag back is blank or missing inspector details. Add inspector info and retake."
+                action = "Write inspector name/initials and date on tag back, then retake close-up."
+            elif "illegible" in detail:
+                msg    = "Tag back is too damaged or smeared to read. Replace tag and retake."
+                action = "Replace inspection tag with a clean one showing inspector details on back."
+            else:
+                msg    = "Tag back failed condition check. Fix and retake."
+                action = "Ensure inspector name/initials are visible on tag back and retake clear image."
+            return force_fail("tag_back_failed", reason or f"Inspection tag back failed: {detail}.", msg, action)
+
+        analysis["pass"] = True
+        return True, (condition_checked or "tag_back_inspector_info_visible"), reason, worker_message, suggested_action
 
     # Fallback
     return passed, condition_checked, reason, worker_message, suggested_action
@@ -3266,7 +3432,7 @@ def analyze_item_image(event, _is_async=False):
     # Build prompt
     if component_focus:
         contract_text = component_check_contract(item_id)
-        COMPONENT_TARGET_NAMES = {"8": "pressure gauge", "9": "instruction label", "10": "inspection tag"}
+        COMPONENT_TARGET_NAMES = {"8": "pressure gauge", "9": "instruction label", "10": "inspection tag", "10_back": "inspection tag back"}
         target_name = COMPONENT_TARGET_NAMES.get(str(item_id), "component")
         prompt = (
             f"Checklist item to inspect (component close-up expected):\n"
