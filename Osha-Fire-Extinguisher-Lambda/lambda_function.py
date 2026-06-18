@@ -93,11 +93,17 @@ COMPONENT_CONFIDENCE_BLOCK_THRESHOLD = float(os.getenv("COMPONENT_CONFIDENCE_BLO
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 
+try:
+    from checklist_loader import load_checklist, clear_cache
+except ImportError:
+    load_checklist = None
+    clear_cache = None
+
 
 # ─────────────────────────────────────────────
-# Checklist Definition — Single Source of Truth (12 items)
+# Checklist Definition — Fallback (used when DynamoDB is unreachable)
 # ─────────────────────────────────────────────
-FIRE_EXTINGUISHER_CHECKLIST = {
+_FALLBACK_CHECKLIST = {
     "inspection_type": "Fire Extinguisher Monthly Inspection",
     "general_information": {
         "location": "", "start_date": "",
@@ -951,9 +957,19 @@ def parse_body(event):
     return body if isinstance(body, dict) else {}
 
 
-def build_description_lookup():
+def get_checklist_template(tenant_id="default"):
+    """Load checklist from DynamoDB with tenant fallback. Falls back to hardcoded."""
+    if load_checklist is not None:
+        template = load_checklist("fire-extinguisher", tenant_id)
+        if template is not None:
+            return template
+    return copy.deepcopy(_FALLBACK_CHECKLIST)
+
+
+def build_description_lookup(tenant_id="default"):
+    checklist = get_checklist_template(tenant_id)
     lookup = {}
-    for category in FIRE_EXTINGUISHER_CHECKLIST.get("categories", []):
+    for category in checklist.get("categories", []):
         for item in category.get("items", []):
             lookup[item["id"]] = item["description"]
     return lookup
@@ -1072,8 +1088,8 @@ def convert_decimals(obj):
         return obj
 
 
-def deep_copy_checklist():
-    return copy.deepcopy(FIRE_EXTINGUISHER_CHECKLIST)
+def deep_copy_checklist(tenant_id="default"):
+    return get_checklist_template(tenant_id)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2201,7 +2217,9 @@ def _extract_image_from_request(body: dict) -> Tuple[Optional[bytes], str]:
 # API 1: GET /fire-extinguisher-inspection/checklist
 # ═══════════════════════════════════════════════════════════════
 def get_checklist(event):
-    return build_response(200, FIRE_EXTINGUISHER_CHECKLIST)
+    params = event.get("queryStringParameters") or {}
+    tenant_id = params.get("tenant_id", "default").strip() or "default"
+    return build_response(200, get_checklist_template(tenant_id))
 
 
 # ═══════════════════════════════════════════════════════════════

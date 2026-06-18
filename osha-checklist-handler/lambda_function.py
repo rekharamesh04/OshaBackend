@@ -1,6 +1,8 @@
 """
 OSHA Inspection Checklist - Lambda Handler
-Single Lambda function handling 8 API routes:
+Single Lambda function handling API routes:
+
+  --- CRUD (Inspections) ---
   POST /inspection-session          → Create a new inspection session (general info)
   POST /inspection                  → Submit checklist (linked to session)
   GET  /inspections                 → List all inspections (summary)
@@ -9,8 +11,16 @@ Single Lambda function handling 8 API routes:
   GET  /evidence/upload-url         → Generate pre-signed S3 URL for uploading evidence
   GET  /evidence/download-url       → Generate pre-signed S3 URL for downloading/viewing evidence
   DELETE /inspection/{id}           → Delete an inspection by ID
+
+  --- Checklist Template Management (CRUD) ---
+  POST   /checklist-template                    → Create a checklist template
+  GET    /checklist-templates                   → List all templates (filter by tenant_id)
+  GET    /checklist-template/{checklist_type}    → Get a specific template (with tenant fallback)
+  PUT    /checklist-template/{checklist_type}    → Update an existing template
+  DELETE /checklist-template/{checklist_type}    → Delete a company-specific template
 """
 
+import copy
 import json
 import os
 import uuid
@@ -19,10 +29,17 @@ import boto3
 from datetime import datetime, timezone
 from decimal import Decimal
 
+try:
+    from checklist_loader import load_checklist, clear_cache
+except ImportError:
+    load_checklist = None
+    clear_cache = None
+
 # Initialize DynamoDB
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("osha-inspections")
 sessions_table = dynamodb.Table("osha-inspection-sessions")
+templates_table = dynamodb.Table(os.getenv("CHECKLIST_TEMPLATE_TABLE", "osha-checklist-templates"))
 
 # API Key Authentication
 EXPECTED_API_KEY = os.getenv("API_KEY", "").strip()
@@ -61,9 +78,9 @@ ALLOWED_CONTENT_TYPES = [
 
 
 # ─────────────────────────────────────────────
-# Checklist Definition — Single Source of Truth
+# Checklist Definition — Fallback (used when DynamoDB is unreachable)
 # ─────────────────────────────────────────────
-OSHA_CHECKLIST = {
+_FALLBACK_CHECKLIST = {
     "inspection_type": "OSHA Inspection Checklist",
     "available_answers": ["Yes", "No"],
     "categories": [
@@ -196,13 +213,26 @@ def build_response(status_code, body):
 
 
 # ─────────────────────────────────────────────
+# Helper: Get checklist template (DynamoDB → fallback)
+# ─────────────────────────────────────────────
+def get_checklist_template(tenant_id="default"):
+    """Load checklist from DynamoDB with tenant fallback. Falls back to hardcoded."""
+    if load_checklist is not None:
+        template = load_checklist("recordkeeping", tenant_id)
+        if template is not None:
+            return template
+    return copy.deepcopy(_FALLBACK_CHECKLIST)
+
+
+# ─────────────────────────────────────────────
 # Helper: Build item description lookup from checklist template
 # ─────────────────────────────────────────────
-def build_description_lookup():
+def build_description_lookup(tenant_id="default"):
     """Creates a dict mapping item_id → {description, title} from the checklist template.
     Handles both top-level items and sub_section items."""
+    checklist = get_checklist_template(tenant_id)
     lookup = {}
-    for category in OSHA_CHECKLIST.get("categories", []):
+    for category in checklist.get("categories", []):
         for item in category.get("items", []):
             lookup[item["id"]] = {"description": item.get("description", ""), "title": item.get("title", "")}
         for sub_section in category.get("sub_sections", []):
@@ -299,8 +329,11 @@ def get_checklist(event):
     """
     Returns the full OSHA checklist template.
     Frontend uses this to render the inspection form dynamically.
+    Supports optional ?tenant_id= query parameter for company-specific checklists.
     """
-    return build_response(200, OSHA_CHECKLIST)
+    params = event.get("queryStringParameters") or {}
+    tenant_id = params.get("tenant_id", "default").strip() or "default"
+    return build_response(200, get_checklist_template(tenant_id))
 
 
 # ─────────────────────────────────────────────
@@ -813,6 +846,380 @@ def delete_inspection(event):
     })
 
 
+# ═══════════════════════════════════════════════════════════════
+# CHECKLIST TEMPLATE MANAGEMENT (CRUD)
+# ═══════════════════════════════════════════════════════════════
+
+# Valid checklist type keys
+VALID_CHECKLIST_TYPES = {
+    "fire-extinguisher", "eyewash", "exit-door",
+    "racking", "hra", "recordkeeping",
+}
+
+
+def _convert_floats_to_decimal(obj):
+    """Convert float values to Decimal for DynamoDB compatibility."""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, dict):
+        return {k: _convert_floats_to_decimal(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_convert_floats_to_decimal(i) for i in obj]
+    return obj
+
+
+# ─────────────────────────────────────────────
+# POST /checklist-template — Create a Checklist Template
+# ─────────────────────────────────────────────
+def create_checklist_template(event):
+    """
+    Creates a new checklist template for a specific tenant and checklist type.
+
+    Expects JSON body:
+    {
+        "tenant_id": "cigroupUSA",
+        "checklist_type": "fire-extinguisher",
+        "inspection_type": "Fire Extinguisher Monthly Inspection",
+        "available_answers": ["Yes", "No", "N/A"],
+        "categories": [ ... ],
+        "general_results": [ ... ],
+        "notes": ""
+    }
+    """
+    try:
+        body = json.loads(event.get("body", "{}"))
+    except json.JSONDecodeError:
+        return build_response(400, {"error": "Invalid JSON in request body"})
+
+    tenant_id = str(body.get("tenant_id", "")).strip()
+    checklist_type = str(body.get("checklist_type", "")).strip()
+
+    if not tenant_id:
+        return build_response(400, {"error": "tenant_id is required"})
+    if not checklist_type:
+        return build_response(400, {"error": "checklist_type is required"})
+    if checklist_type not in VALID_CHECKLIST_TYPES:
+        return build_response(400, {
+            "error": f"checklist_type must be one of: {sorted(VALID_CHECKLIST_TYPES)}"
+        })
+
+    # Check if template already exists
+    try:
+        existing = templates_table.get_item(Key={
+            "tenant_id": tenant_id,
+            "checklist_type": checklist_type,
+        })
+        if existing.get("Item"):
+            return build_response(409, {
+                "error": f"Template already exists for tenant '{tenant_id}', type '{checklist_type}'. Use PUT to update."
+            })
+    except Exception as e:
+        print(f"Error checking existing template: {str(e)}")
+
+    categories = body.get("categories", [])
+    if not categories or not isinstance(categories, list):
+        return build_response(400, {"error": "categories must be a non-empty list"})
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    item = {
+        "tenant_id": tenant_id,
+        "checklist_type": checklist_type,
+        "inspection_type": body.get("inspection_type", ""),
+        "available_answers": body.get("available_answers", ["Yes", "No", "N/A"]),
+        "categories": categories,
+        "general_information": body.get("general_information", {}),
+        "general_results": body.get("general_results", []),
+        "notes": body.get("notes", ""),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    try:
+        templates_table.put_item(Item=_convert_floats_to_decimal(item))
+    except Exception as e:
+        print(f"Error creating template: {str(e)}")
+        return build_response(500, {"error": f"Failed to create template: {str(e)}"})
+
+    # Clear loader cache so next request picks up the new template
+    if clear_cache:
+        clear_cache()
+
+    return build_response(201, {
+        "message": "Checklist template created successfully",
+        "tenant_id": tenant_id,
+        "checklist_type": checklist_type,
+        "created_at": now,
+    })
+
+
+# ─────────────────────────────────────────────
+# GET /checklist-templates — List All Templates
+# ─────────────────────────────────────────────
+def list_checklist_templates(event):
+    """
+    Lists all checklist templates. Optionally filter by tenant_id.
+
+    Query Parameters:
+        tenant_id (optional) — Filter by tenant (e.g., "default", "cigroupUSA")
+    """
+    params = event.get("queryStringParameters") or {}
+    tenant_id_filter = params.get("tenant_id", "").strip()
+
+    try:
+        if tenant_id_filter:
+            # Query by partition key
+            resp = templates_table.query(
+                KeyConditionExpression=boto3.dynamodb.conditions.Key("tenant_id").eq(tenant_id_filter)
+            )
+            items = resp.get("Items", [])
+        else:
+            # Scan all
+            resp = templates_table.scan()
+            items = resp.get("Items", [])
+            while "LastEvaluatedKey" in resp:
+                resp = templates_table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+                items.extend(resp.get("Items", []))
+    except Exception as e:
+        print(f"Error listing templates: {str(e)}")
+        return build_response(500, {"error": f"Failed to list templates: {str(e)}"})
+
+    # Convert Decimals and build summary
+    items = convert_decimals(items)
+    summary = []
+    for item in items:
+        item_count = 0
+        cat_count = 0
+        for cat in item.get("categories", []):
+            cat_count += 1
+            item_count += len(cat.get("items", []))
+            for sub in cat.get("sub_sections", []):
+                item_count += len(sub.get("items", []))
+
+        summary.append({
+            "tenant_id": item.get("tenant_id"),
+            "checklist_type": item.get("checklist_type"),
+            "inspection_type": item.get("inspection_type"),
+            "category_count": cat_count,
+            "item_count": item_count,
+            "created_at": item.get("created_at"),
+            "updated_at": item.get("updated_at"),
+        })
+
+    summary.sort(key=lambda x: (x.get("tenant_id", ""), x.get("checklist_type", "")))
+    return build_response(200, {"templates": summary, "count": len(summary)})
+
+
+# ─────────────────────────────────────────────
+# GET /checklist-template/{checklist_type} — Get a Specific Template
+# ─────────────────────────────────────────────
+def get_checklist_template_by_type(event):
+    """
+    Gets a specific checklist template by type, with tenant fallback.
+
+    Path Parameters:
+        checklist_type (required) — e.g., "fire-extinguisher"
+
+    Query Parameters:
+        tenant_id (optional, default "default") — Tenant to look up
+    """
+    path_params = event.get("pathParameters", {}) or {}
+    checklist_type = str(path_params.get("checklist_type", "")).strip()
+
+    if not checklist_type:
+        return build_response(400, {"error": "checklist_type is required in the URL path"})
+
+    params = event.get("queryStringParameters") or {}
+    tenant_id = params.get("tenant_id", "default").strip() or "default"
+
+    try:
+        # Try tenant-specific first
+        resp = templates_table.get_item(Key={
+            "tenant_id": tenant_id,
+            "checklist_type": checklist_type,
+        })
+        item = resp.get("Item")
+        source = "tenant"
+
+        # Fallback to default
+        if not item and tenant_id != "default":
+            resp = templates_table.get_item(Key={
+                "tenant_id": "default",
+                "checklist_type": checklist_type,
+            })
+            item = resp.get("Item")
+            source = "default (fallback)"
+
+        if not item:
+            return build_response(404, {
+                "error": f"Checklist template not found for type '{checklist_type}'"
+            })
+
+        item = convert_decimals(item)
+        item["_source"] = source  # Tell the caller where the data came from
+        return build_response(200, item)
+
+    except Exception as e:
+        print(f"Error getting template: {str(e)}")
+        return build_response(500, {"error": f"Failed to get template: {str(e)}"})
+
+
+# ─────────────────────────────────────────────
+# PUT /checklist-template/{checklist_type} — Update a Template
+# ─────────────────────────────────────────────
+def update_checklist_template(event):
+    """
+    Updates an existing checklist template.
+
+    Path Parameters:
+        checklist_type (required) — e.g., "fire-extinguisher"
+
+    Expects JSON body with fields to update:
+    {
+        "tenant_id": "cigroupUSA",
+        "categories": [ ... ],
+        "available_answers": [ ... ],
+        ...
+    }
+    """
+    path_params = event.get("pathParameters", {}) or {}
+    checklist_type = str(path_params.get("checklist_type", "")).strip()
+
+    if not checklist_type:
+        return build_response(400, {"error": "checklist_type is required in the URL path"})
+
+    try:
+        body = json.loads(event.get("body", "{}"))
+    except json.JSONDecodeError:
+        return build_response(400, {"error": "Invalid JSON in request body"})
+
+    tenant_id = str(body.get("tenant_id", "default")).strip() or "default"
+
+    # Verify the template exists
+    try:
+        existing = templates_table.get_item(Key={
+            "tenant_id": tenant_id,
+            "checklist_type": checklist_type,
+        })
+        if not existing.get("Item"):
+            return build_response(404, {
+                "error": f"Template not found for tenant '{tenant_id}', type '{checklist_type}'. Use POST to create."
+            })
+    except Exception as e:
+        print(f"Error checking template: {str(e)}")
+        return build_response(500, {"error": f"Failed to verify template: {str(e)}"})
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Build update expression dynamically for provided fields
+    updatable_fields = [
+        "inspection_type", "available_answers", "categories",
+        "general_information", "general_results", "notes",
+    ]
+    update_parts = ["#updated_at = :updated_at"]
+    attr_names = {"#updated_at": "updated_at"}
+    attr_values = {":updated_at": now}
+
+    for field in updatable_fields:
+        if field in body:
+            safe_name = f"#{field}"
+            safe_value = f":{field}"
+            update_parts.append(f"{safe_name} = {safe_value}")
+            attr_names[safe_name] = field
+            attr_values[safe_value] = _convert_floats_to_decimal(body[field])
+
+    if len(update_parts) == 1:
+        return build_response(400, {
+            "error": f"No updatable fields provided. Updatable fields: {updatable_fields}"
+        })
+
+    try:
+        templates_table.update_item(
+            Key={"tenant_id": tenant_id, "checklist_type": checklist_type},
+            UpdateExpression="SET " + ", ".join(update_parts),
+            ExpressionAttributeNames=attr_names,
+            ExpressionAttributeValues=attr_values,
+        )
+    except Exception as e:
+        print(f"Error updating template: {str(e)}")
+        return build_response(500, {"error": f"Failed to update template: {str(e)}"})
+
+    # Clear loader cache
+    if clear_cache:
+        clear_cache()
+
+    return build_response(200, {
+        "message": "Checklist template updated successfully",
+        "tenant_id": tenant_id,
+        "checklist_type": checklist_type,
+        "updated_at": now,
+    })
+
+
+# ─────────────────────────────────────────────
+# DELETE /checklist-template/{checklist_type} — Delete a Template
+# ─────────────────────────────────────────────
+def delete_checklist_template(event):
+    """
+    Deletes a company-specific checklist template (reverts to default).
+
+    Path Parameters:
+        checklist_type (required)
+
+    Query Parameters:
+        tenant_id (required) — Must not be "default" (cannot delete master templates)
+    """
+    path_params = event.get("pathParameters", {}) or {}
+    checklist_type = str(path_params.get("checklist_type", "")).strip()
+
+    if not checklist_type:
+        return build_response(400, {"error": "checklist_type is required in the URL path"})
+
+    params = event.get("queryStringParameters") or {}
+    tenant_id = params.get("tenant_id", "").strip()
+
+    if not tenant_id:
+        return build_response(400, {"error": "tenant_id query parameter is required"})
+
+    if tenant_id == "default":
+        return build_response(403, {
+            "error": "Cannot delete default templates. Default templates are the master source of truth."
+        })
+
+    # Verify the template exists
+    try:
+        existing = templates_table.get_item(Key={
+            "tenant_id": tenant_id,
+            "checklist_type": checklist_type,
+        })
+        if not existing.get("Item"):
+            return build_response(404, {
+                "error": f"No custom template found for tenant '{tenant_id}', type '{checklist_type}'"
+            })
+    except Exception as e:
+        print(f"Error checking template: {str(e)}")
+        return build_response(500, {"error": f"Failed to verify template: {str(e)}"})
+
+    try:
+        templates_table.delete_item(Key={
+            "tenant_id": tenant_id,
+            "checklist_type": checklist_type,
+        })
+    except Exception as e:
+        print(f"Error deleting template: {str(e)}")
+        return build_response(500, {"error": f"Failed to delete template: {str(e)}"})
+
+    # Clear loader cache
+    if clear_cache:
+        clear_cache()
+
+    return build_response(200, {
+        "message": f"Custom template deleted. Tenant '{tenant_id}' will now use the default '{checklist_type}' template.",
+        "tenant_id": tenant_id,
+        "checklist_type": checklist_type,
+    })
+
+
 # ─────────────────────────────────────────────
 # Main Handler — Routes to correct function
 # ─────────────────────────────────────────────
@@ -871,6 +1278,22 @@ def lambda_handler(event, context):
 
     elif http_method == "GET" and resource == "/evidence/download-url":
         return generate_download_url(event)
+
+    # ── Checklist Template CRUD ──
+    elif http_method == "POST" and resource == "/checklist-template":
+        return create_checklist_template(event)
+
+    elif http_method == "GET" and resource == "/checklist-templates":
+        return list_checklist_templates(event)
+
+    elif http_method == "GET" and resource == "/checklist-template/{checklist_type}":
+        return get_checklist_template_by_type(event)
+
+    elif http_method == "PUT" and resource == "/checklist-template/{checklist_type}":
+        return update_checklist_template(event)
+
+    elif http_method == "DELETE" and resource == "/checklist-template/{checklist_type}":
+        return delete_checklist_template(event)
 
     else:
         return build_response(404, {"error": f"Route not found: {http_method} {resource}"})

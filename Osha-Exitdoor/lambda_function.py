@@ -77,6 +77,12 @@ try:
 except Exception:
     Image = None
 
+try:
+    from checklist_loader import load_checklist, clear_cache
+except ImportError:
+    load_checklist = None
+    clear_cache = None
+
 # ─────────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────────
@@ -556,9 +562,19 @@ def parse_body(event):
     return body if isinstance(body, dict) else {}
 
 
-def build_description_lookup():
+def get_checklist_template(tenant_id="default"):
+    """Load checklist from DynamoDB with tenant fallback. Falls back to hardcoded."""
+    if load_checklist is not None:
+        template = load_checklist("exit-door", tenant_id)
+        if template is not None:
+            return template
+    return copy.deepcopy(EXIT_DOOR_CHECKLIST)
+
+
+def build_description_lookup(tenant_id="default"):
+    checklist = get_checklist_template(tenant_id)
     lookup = {}
-    for category in EXIT_DOOR_CHECKLIST.get("categories", []):
+    for category in checklist.get("categories", []):
         for item in category.get("items", []):
             lookup[item["id"]] = item["description"]
     return lookup
@@ -651,8 +667,8 @@ def convert_decimals(obj):
         return obj
 
 
-def deep_copy_checklist():
-    return copy.deepcopy(EXIT_DOOR_CHECKLIST)
+def deep_copy_checklist(tenant_id="default"):
+    return get_checklist_template(tenant_id)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1068,7 +1084,9 @@ def _extract_image_from_request(body: dict) -> Tuple[Optional[bytes], str]:
 # API 1: GET /exit-door-inspection/checklist
 # ═══════════════════════════════════════════════════════════════
 def get_checklist(event):
-    return build_response(200, EXIT_DOOR_CHECKLIST)
+    params = event.get("queryStringParameters") or {}
+    tenant_id = params.get("tenant_id", "default").strip() or "default"
+    return build_response(200, get_checklist_template(tenant_id))
 
 
 # ═══════════════════════════════════════════════════════════════

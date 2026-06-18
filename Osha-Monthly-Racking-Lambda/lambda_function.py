@@ -82,9 +82,15 @@ VALID_OBJECTS = {
 # API Key Authentication
 EXPECTED_API_KEY = os.getenv("API_KEY", "").strip()
 
+try:
+    from checklist_loader import load_checklist, clear_cache
+except ImportError:
+    load_checklist = None
+    clear_cache = None
+
 
 # ─────────────────────────────────────────────
-# Checklist Definition — Single Source of Truth
+# Checklist Definition — Fallback (used when DynamoDB is unreachable)
 # ─────────────────────────────────────────────
 RACKING_CHECKLIST = {
     "inspection_type": "Racking Inspection",
@@ -212,10 +218,20 @@ def build_response(status_code, body):
 # ─────────────────────────────────────────────
 # Helper: Build item description lookup from checklist template
 # ─────────────────────────────────────────────
-def build_description_lookup():
+def get_checklist_template(tenant_id="default"):
+    """Load checklist from DynamoDB with tenant fallback. Falls back to hardcoded."""
+    if load_checklist is not None:
+        template = load_checklist("racking", tenant_id)
+        if template is not None:
+            return template
+    return copy.deepcopy(RACKING_CHECKLIST)
+
+
+def build_description_lookup(tenant_id="default"):
     """Creates a dict mapping item_id → description from the checklist template."""
+    checklist = get_checklist_template(tenant_id)
     lookup = {}
-    for category in RACKING_CHECKLIST.get("categories", []):
+    for category in checklist.get("categories", []):
         for item in category.get("items", []):
             lookup[item["id"]] = item["description"]
     return lookup
@@ -667,7 +683,8 @@ def get_item_visual_rule(item_id, item_description=""):
 
 def get_ai_enablement_matrix(event):
     rows = []
-    for category in RACKING_CHECKLIST.get("categories", []):
+    checklist = get_checklist_template()
+    for category in checklist.get("categories", []):
         for item in category.get("items", []):
             policy = get_item_ai_policy(item.get("id"))
             rows.append({
@@ -1189,8 +1206,8 @@ def update_checklist_item(event):
     if checklist_item is None:
         return build_response(404, {"error": "Checklist item not found"})
 
-    if answer and answer not in RACKING_CHECKLIST.get("available_answers", []):
-        return build_response(400, {"error": f"answer must be one of {RACKING_CHECKLIST.get('available_answers', [])}"})
+    if answer and answer not in get_checklist_template().get("available_answers", []):
+        return build_response(400, {"error": f"answer must be one of {get_checklist_template().get('available_answers', [])}"})
 
     if answer:
         checklist_item["answer"] = answer
@@ -1443,8 +1460,11 @@ def get_checklist(event):
     """
     Returns the full racking checklist template.
     Frontend uses this to render the inspection form dynamically.
+    Supports optional ?tenant_id= query parameter for company-specific checklists.
     """
-    return build_response(200, RACKING_CHECKLIST)
+    params = event.get("queryStringParameters") or {}
+    tenant_id = params.get("tenant_id", "default").strip() or "default"
+    return build_response(200, get_checklist_template(tenant_id))
 
 
 # ─────────────────────────────────────────────

@@ -8,6 +8,7 @@ Single Lambda function handling all 5 API routes:
   DELETE /hra-inspection/{id}       → Delete an HRA inspection by ID
 """
 
+import copy
 import json
 import os
 import uuid
@@ -15,6 +16,12 @@ import uuid
 import boto3
 from datetime import datetime, timezone
 from decimal import Decimal
+
+try:
+    from checklist_loader import load_checklist, clear_cache
+except ImportError:
+    load_checklist = None
+    clear_cache = None
 
 # Initialize DynamoDB
 dynamodb = boto3.resource("dynamodb")
@@ -26,9 +33,9 @@ EXPECTED_API_KEY = os.getenv("API_KEY", "").strip()
 
 
 # ─────────────────────────────────────────────
-# Checklist Definition — Single Source of Truth
+# Checklist Definition — Fallback (used when DynamoDB is unreachable)
 # ─────────────────────────────────────────────
-HRA_CHECKLIST = {
+_FALLBACK_CHECKLIST = {
     "inspection_type": "Quarterly Hazard Risk Assessment (HRA)",
     "general_information": {
         "location": "",
@@ -239,12 +246,25 @@ def build_response(status_code, body):
 
 
 # ─────────────────────────────────────────────
+# Helper: Get checklist template (DynamoDB → fallback)
+# ─────────────────────────────────────────────
+def get_checklist_template(tenant_id="default"):
+    """Load checklist from DynamoDB with tenant fallback. Falls back to hardcoded."""
+    if load_checklist is not None:
+        template = load_checklist("hra", tenant_id)
+        if template is not None:
+            return template
+    return copy.deepcopy(_FALLBACK_CHECKLIST)
+
+
+# ─────────────────────────────────────────────
 # Helper: Build item description lookup from checklist template
 # ─────────────────────────────────────────────
-def build_description_lookup():
+def build_description_lookup(tenant_id="default"):
     """Creates a dict mapping item_id → description from the checklist template."""
+    checklist = get_checklist_template(tenant_id)
     lookup = {}
-    for category in HRA_CHECKLIST.get("categories", []):
+    for category in checklist.get("categories", []):
         for item in category.get("items", []):
             lookup[item["id"]] = item["description"]
     return lookup
@@ -275,8 +295,11 @@ def get_checklist(event):
     """
     Returns the full HRA checklist template.
     Frontend uses this to render the inspection form dynamically.
+    Supports optional ?tenant_id= query parameter for company-specific checklists.
     """
-    return build_response(200, HRA_CHECKLIST)
+    params = event.get("queryStringParameters") or {}
+    tenant_id = params.get("tenant_id", "default").strip() or "default"
+    return build_response(200, get_checklist_template(tenant_id))
 
 
 # ─────────────────────────────────────────────

@@ -19,6 +19,12 @@ try:
 except Exception:
     Image = None
 
+try:
+    from checklist_loader import load_checklist, clear_cache
+except ImportError:
+    load_checklist = None
+    clear_cache = None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -44,8 +50,8 @@ bedrock          = boto3.client("bedrock-runtime", region_name=AWS_REGION)
 inspection_table = dynamodb.Table(INSPECTION_TABLE_NAME)
 session_table    = dynamodb.Table(SESSION_TABLE_NAME)
 
-# ── Checklist ──────────────────────────────────────────────────────────────────
-EYEWASH_CHECKLIST = {
+# ── Checklist (Fallback — used when DynamoDB is unreachable) ─────────────────
+_FALLBACK_CHECKLIST = {
     "inspection_type": "Eyewash/Emergency Shower Weekly Inspection",
     "general_information": {"location": "", "start_date": "", "checklist": "Eyewash/Emergency Shower Weekly Inspection", "leader": "", "team": []},
     "available_answers": ["Yes", "No", "N/A"],
@@ -562,9 +568,19 @@ def get_item_ai_policy(item_id: str) -> dict:
     }
 
 
+def get_checklist_template(tenant_id="default"):
+    """Load checklist from DynamoDB with tenant fallback. Falls back to hardcoded."""
+    if load_checklist is not None:
+        template = load_checklist("eyewash", tenant_id)
+        if template is not None:
+            return template
+    return copy.deepcopy(_FALLBACK_CHECKLIST)
+
+
 def get_ai_enablement_matrix(event: dict) -> dict:
     rows = []
-    for category in EYEWASH_CHECKLIST.get("categories", []):
+    checklist = get_checklist_template()
+    for category in checklist.get("categories", []):
         for item in category.get("items", []):
             sid = str(item.get("id", ""))
             policy = get_item_ai_policy(sid)
@@ -714,8 +730,8 @@ def extract_text_from_claude_response(resp: dict) -> str:
     first = content[0]
     return first.get("text", "") if isinstance(first, dict) else ""
 
-def deep_copy_checklist() -> dict:
-    return copy.deepcopy(EYEWASH_CHECKLIST)
+def deep_copy_checklist(tenant_id="default") -> dict:
+    return get_checklist_template(tenant_id)
 
 def get_all_items(inspection: dict) -> List[dict]:
     items = []
@@ -898,7 +914,9 @@ def generate_s3_download_url(file_key: str) -> Optional[str]:
 # ── Route handlers ─────────────────────────────────────────────────────────────
 
 def get_checklist(event: dict) -> dict:
-    return json_response(200, EYEWASH_CHECKLIST)
+    params = event.get("queryStringParameters") or {}
+    tenant_id = params.get("tenant_id", "default").strip() or "default"
+    return json_response(200, get_checklist_template(tenant_id))
 
 
 
