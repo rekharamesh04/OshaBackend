@@ -1,13 +1,24 @@
 """
-checklist_loader.py — Shared Checklist Template Loader
+checklist_loader.py — Shared Checklist Template Loader (v2 — Overlay Model)
 
 Fetches inspection checklist templates from the 'osha-checklist-templates'
-DynamoDB table with tenant-specific fallback:
+DynamoDB table with tenant overlay support:
 
-  1. Try (tenant_id, checklist_type)
-  2. If not found, fall back to ("default", checklist_type)
-  3. Cache in Lambda memory for warm invocation reuse
-  4. Return deep copy so callers can mutate freely
+  1. Always load the "default" master template
+  2. If tenant_id != "default", load the tenant's overlay record
+  3. Merge: mark disabled items (is_enabled=false), append custom items
+  4. Cache in Lambda memory for warm invocation reuse
+  5. Return deep copy so callers can mutate freely
+
+Overlay record schema (tenant != "default"):
+  {
+    "tenant_id": "cigroupUSA",
+    "checklist_type": "fire-extinguisher",
+    "disabled_items": [3, 7],        # IDs of default items to hide
+    "custom_items": [                 # Additional company-specific questions
+      {"id": "custom_1719093000", "description": "...", "category_id": 1, ...}
+    ]
+  }
 
 Place this file alongside lambda_function.py in each Lambda's deployment folder.
 """
@@ -46,16 +57,120 @@ def _get_table():
     return dynamodb.Table(table_name)
 
 
+def _fetch_item(table, tenant_id, checklist_type):
+    """Fetch a single item from DynamoDB. Returns dict or None."""
+    resp = table.get_item(Key={
+        "tenant_id": tenant_id,
+        "checklist_type": checklist_type,
+    })
+    item = resp.get("Item")
+    if item:
+        return _convert_decimals(item)
+    return None
+
+
+def _normalize_id(item_id):
+    """Normalize an item ID for comparison (int or string)."""
+    if isinstance(item_id, (int, float, Decimal)):
+        return int(item_id)
+    return item_id
+
+
+def _apply_overlay(default_template, overlay):
+    """
+    Merge an overlay record onto a default template.
+
+    - Adds is_enabled=true to all default items
+    - Sets is_enabled=false for items in overlay["disabled_items"]
+    - Appends overlay["custom_items"] to their target categories
+    - Returns a new dict (does not mutate inputs)
+    """
+    result = copy.deepcopy(default_template)
+
+    disabled_set = set()
+    for item_id in overlay.get("disabled_items", []):
+        disabled_set.add(_normalize_id(item_id))
+
+    custom_items = overlay.get("custom_items", [])
+
+    # Mark is_enabled on all default items
+    for category in result.get("categories", []):
+        for item in category.get("items", []):
+            item["is_enabled"] = _normalize_id(item.get("id")) not in disabled_set
+
+        # Also handle sub_sections if present
+        for sub in category.get("sub_sections", []):
+            for item in sub.get("items", []):
+                item["is_enabled"] = _normalize_id(item.get("id")) not in disabled_set
+
+    # Append custom items to their target categories
+    if custom_items:
+        cat_map = {}
+        for cat in result.get("categories", []):
+            cat_map[_normalize_id(cat.get("id"))] = cat
+
+        for custom in custom_items:
+            custom_copy = copy.deepcopy(custom)
+            custom_copy["is_enabled"] = True
+            custom_copy["is_custom"] = True
+            if "title" not in custom_copy:
+                custom_copy["title"] = "Custom Field"
+
+            target_cat_id = custom_copy.pop("category_id", None)
+            if target_cat_id is not None and _normalize_id(target_cat_id) in cat_map:
+                cat_map[_normalize_id(target_cat_id)]["items"].append(custom_copy)
+            else:
+                # If no matching category, append to the last category
+                cats = result.get("categories", [])
+                if cats:
+                    cats[-1]["items"].append(custom_copy)
+
+    return result
+
+
+def _mark_all_enabled(template):
+    """Add is_enabled=true to every item in a template (no overlay case)."""
+    result = copy.deepcopy(template)
+    for category in result.get("categories", []):
+        for item in category.get("items", []):
+            item["is_enabled"] = True
+        for sub in category.get("sub_sections", []):
+            for item in sub.get("items", []):
+                item["is_enabled"] = True
+    return result
+
+
+def filter_disabled_items(template):
+    """
+    Remove items where is_enabled=false from the template.
+    Used by inspection endpoints (mobile app should only see enabled items).
+    Returns a new dict.
+    """
+    result = copy.deepcopy(template)
+    for category in result.get("categories", []):
+        category["items"] = [
+            item for item in category.get("items", [])
+            if item.get("is_enabled", True)
+        ]
+        for sub in category.get("sub_sections", []):
+            sub["items"] = [
+                item for item in sub.get("items", [])
+                if item.get("is_enabled", True)
+            ]
+    return result
+
+
 def load_checklist(checklist_type: str, tenant_id: str = "default") -> dict:
     """
-    Fetch a checklist template from DynamoDB with tenant fallback.
+    Fetch a checklist template from DynamoDB with overlay merge.
 
-    1. Try (tenant_id, checklist_type) — company-specific
-    2. If not found and tenant_id != "default", try ("default", checklist_type)
-    3. Cache result in memory for warm Lambda reuse
-    4. Return deep copy so callers can mutate (add answers, evidence, etc.)
+    1. Load the "default" master template
+    2. If tenant_id != "default", load the tenant overlay
+    3. Merge: apply disabled_items + custom_items onto the default
+    4. All items get is_enabled flag (true/false)
+    5. Cache result in memory for warm Lambda reuse
 
-    Returns None if not found in DynamoDB (caller should fall back to hardcoded).
+    Returns None if default template not found (caller should fall back to hardcoded).
     """
     cache_key = f"{tenant_id}:{checklist_type}"
     if cache_key in _CACHE:
@@ -64,30 +179,32 @@ def load_checklist(checklist_type: str, tenant_id: str = "default") -> dict:
     try:
         table = _get_table()
 
-        # Try tenant-specific record first
-        resp = table.get_item(Key={
-            "tenant_id": tenant_id,
-            "checklist_type": checklist_type,
-        })
-        item = resp.get("Item")
+        # Always load the default template first
+        default_item = _fetch_item(table, "default", checklist_type)
 
-        # Fallback to default if tenant-specific not found
-        if not item and tenant_id != "default":
-            resp = table.get_item(Key={
-                "tenant_id": "default",
-                "checklist_type": checklist_type,
-            })
-            item = resp.get("Item")
+        if not default_item:
+            return None
 
-        if item:
-            # Remove DynamoDB key / metadata fields — they aren't part of the template
-            item.pop("tenant_id", None)
-            item.pop("checklist_type", None)
-            item.pop("created_at", None)
-            item.pop("updated_at", None)
-            item = _convert_decimals(item)
-            _CACHE[cache_key] = item
-            return copy.deepcopy(item)
+        # Remove DynamoDB metadata fields
+        for key in ("tenant_id", "checklist_type", "created_at", "updated_at"):
+            default_item.pop(key, None)
+
+        if tenant_id == "default":
+            # No overlay — just mark all items as enabled
+            result = _mark_all_enabled(default_item)
+        else:
+            # Load tenant overlay
+            overlay = _fetch_item(table, tenant_id, checklist_type)
+
+            if overlay and ("disabled_items" in overlay or "custom_items" in overlay):
+                # Apply overlay onto default
+                result = _apply_overlay(default_item, overlay)
+            else:
+                # No overlay for this tenant — use default with all enabled
+                result = _mark_all_enabled(default_item)
+
+        _CACHE[cache_key] = result
+        return copy.deepcopy(result)
 
     except Exception as e:
         logger.error(
@@ -96,6 +213,51 @@ def load_checklist(checklist_type: str, tenant_id: str = "default") -> dict:
         )
 
     return None
+
+
+def load_tenant_overlay(checklist_type: str, tenant_id: str) -> dict:
+    """
+    Load the raw tenant overlay record from DynamoDB.
+    Returns the overlay dict or None if not found.
+    Used by admin CRUD endpoints.
+    """
+    if tenant_id == "default":
+        return None
+
+    try:
+        table = _get_table()
+        item = _fetch_item(table, tenant_id, checklist_type)
+        if item and ("disabled_items" in item or "custom_items" in item):
+            return item
+    except Exception as e:
+        logger.error(
+            "Failed to load overlay for '%s' tenant '%s': %s",
+            checklist_type, tenant_id, e,
+        )
+    return None
+
+
+def get_default_item_ids(checklist_type: str) -> set:
+    """
+    Get the set of all valid item IDs from the default template.
+    Used for validating toggle-item requests.
+    """
+    try:
+        table = _get_table()
+        default_item = _fetch_item(table, "default", checklist_type)
+        if not default_item:
+            return set()
+
+        ids = set()
+        for cat in default_item.get("categories", []):
+            for item in cat.get("items", []):
+                ids.add(_normalize_id(item.get("id")))
+            for sub in cat.get("sub_sections", []):
+                for item in sub.get("items", []):
+                    ids.add(_normalize_id(item.get("id")))
+        return ids
+    except Exception:
+        return set()
 
 
 def clear_cache():
