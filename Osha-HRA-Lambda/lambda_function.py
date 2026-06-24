@@ -18,10 +18,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 try:
-    from checklist_loader import load_checklist, clear_cache
+    from checklist_loader import load_checklist, clear_cache, filter_disabled_items
 except ImportError:
     load_checklist = None
     clear_cache = None
+    filter_disabled_items = None
 
 # Initialize DynamoDB
 dynamodb = boto3.resource("dynamodb")
@@ -248,10 +249,10 @@ def build_response(status_code, body):
 # ─────────────────────────────────────────────
 # Helper: Get checklist template (DynamoDB → fallback)
 # ─────────────────────────────────────────────
-def get_checklist_template(tenant_id="default"):
-    """Load checklist from DynamoDB with tenant fallback. Falls back to hardcoded."""
+def get_checklist_template(company_key="default"):
+    """Load checklist from DynamoDB with company overlay fallback. Falls back to hardcoded."""
     if load_checklist is not None:
-        template = load_checklist("hra", tenant_id)
+        template = load_checklist("hra", company_key)
         if template is not None:
             return template
     return copy.deepcopy(_FALLBACK_CHECKLIST)
@@ -260,9 +261,9 @@ def get_checklist_template(tenant_id="default"):
 # ─────────────────────────────────────────────
 # Helper: Build item description lookup from checklist template
 # ─────────────────────────────────────────────
-def build_description_lookup(tenant_id="default"):
+def build_description_lookup(company_key="default"):
     """Creates a dict mapping item_id → description from the checklist template."""
-    checklist = get_checklist_template(tenant_id)
+    checklist = get_checklist_template(company_key)
     lookup = {}
     for category in checklist.get("categories", []):
         for item in category.get("items", []):
@@ -293,13 +294,16 @@ def convert_decimals(obj):
 # ─────────────────────────────────────────────
 def get_checklist(event):
     """
-    Returns the full HRA checklist template.
-    Frontend uses this to render the inspection form dynamically.
-    Supports optional ?tenant_id= query parameter for company-specific checklists.
+    Returns the HRA checklist template for mobile inspection.
+    Disabled items are filtered out so the mobile app only sees enabled questions.
+    Supports optional ?company_key= query parameter for company-specific checklists.
     """
     params = event.get("queryStringParameters") or {}
-    tenant_id = params.get("tenant_id", "default").strip() or "default"
-    return build_response(200, get_checklist_template(tenant_id))
+    company_key = params.get("company_key", params.get("tenant_id", "default")).strip() or "default"
+    template = get_checklist_template(company_key)
+    if filter_disabled_items is not None:
+        template = filter_disabled_items(template)
+    return build_response(200, template)
 
 
 # ─────────────────────────────────────────────

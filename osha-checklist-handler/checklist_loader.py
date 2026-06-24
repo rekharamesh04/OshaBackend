@@ -1,18 +1,18 @@
 """
-checklist_loader.py — Shared Checklist Template Loader (v2 — Overlay Model)
+checklist_loader.py — Shared Checklist Template Loader (v3 — Company-Level Overlay)
 
 Fetches inspection checklist templates from the 'osha-checklist-templates'
-DynamoDB table with tenant overlay support:
+DynamoDB table with company-level overlay support:
 
   1. Always load the "default" master template
-  2. If tenant_id != "default", load the tenant's overlay record
+  2. If company_key != "default", load the company's overlay record
   3. Merge: mark disabled items (is_enabled=false), append custom items
   4. Cache in Lambda memory for warm invocation reuse
   5. Return deep copy so callers can mutate freely
 
-Overlay record schema (tenant != "default"):
+Overlay record schema (company != "default"):
   {
-    "tenant_id": "cigroupUSA",
+    "tenant_id": "cigroupusa",       # DynamoDB PK — stores company_key value
     "checklist_type": "fire-extinguisher",
     "disabled_items": [3, 7],        # IDs of default items to hide
     "custom_items": [                 # Additional company-specific questions
@@ -160,19 +160,19 @@ def filter_disabled_items(template):
     return result
 
 
-def load_checklist(checklist_type: str, tenant_id: str = "default") -> dict:
+def load_checklist(checklist_type: str, company_key: str = "default") -> dict:
     """
-    Fetch a checklist template from DynamoDB with overlay merge.
+    Fetch a checklist template from DynamoDB with company overlay merge.
 
     1. Load the "default" master template
-    2. If tenant_id != "default", load the tenant overlay
+    2. If company_key != "default", load the company's overlay
     3. Merge: apply disabled_items + custom_items onto the default
     4. All items get is_enabled flag (true/false)
     5. Cache result in memory for warm Lambda reuse
 
     Returns None if default template not found (caller should fall back to hardcoded).
     """
-    cache_key = f"{tenant_id}:{checklist_type}"
+    cache_key = f"{company_key}:{checklist_type}"
     if cache_key in _CACHE:
         return copy.deepcopy(_CACHE[cache_key])
 
@@ -189,18 +189,18 @@ def load_checklist(checklist_type: str, tenant_id: str = "default") -> dict:
         for key in ("tenant_id", "checklist_type", "created_at", "updated_at"):
             default_item.pop(key, None)
 
-        if tenant_id == "default":
+        if company_key == "default":
             # No overlay — just mark all items as enabled
             result = _mark_all_enabled(default_item)
         else:
-            # Load tenant overlay
-            overlay = _fetch_item(table, tenant_id, checklist_type)
+            # Load company overlay (stored under tenant_id column in DynamoDB)
+            overlay = _fetch_item(table, company_key, checklist_type)
 
             if overlay and ("disabled_items" in overlay or "custom_items" in overlay):
                 # Apply overlay onto default
                 result = _apply_overlay(default_item, overlay)
             else:
-                # No overlay for this tenant — use default with all enabled
+                # No overlay for this company — use default with all enabled
                 result = _mark_all_enabled(default_item)
 
         _CACHE[cache_key] = result
@@ -208,31 +208,31 @@ def load_checklist(checklist_type: str, tenant_id: str = "default") -> dict:
 
     except Exception as e:
         logger.error(
-            "Failed to load checklist '%s' for tenant '%s': %s",
-            checklist_type, tenant_id, e,
+            "Failed to load checklist '%s' for company '%s': %s",
+            checklist_type, company_key, e,
         )
 
     return None
 
 
-def load_tenant_overlay(checklist_type: str, tenant_id: str) -> dict:
+def load_company_overlay(checklist_type: str, company_key: str) -> dict:
     """
-    Load the raw tenant overlay record from DynamoDB.
+    Load the raw company overlay record from DynamoDB.
     Returns the overlay dict or None if not found.
     Used by admin CRUD endpoints.
     """
-    if tenant_id == "default":
+    if company_key == "default":
         return None
 
     try:
         table = _get_table()
-        item = _fetch_item(table, tenant_id, checklist_type)
+        item = _fetch_item(table, company_key, checklist_type)
         if item and ("disabled_items" in item or "custom_items" in item):
             return item
     except Exception as e:
         logger.error(
-            "Failed to load overlay for '%s' tenant '%s': %s",
-            checklist_type, tenant_id, e,
+            "Failed to load overlay for '%s' company '%s': %s",
+            checklist_type, company_key, e,
         )
     return None
 

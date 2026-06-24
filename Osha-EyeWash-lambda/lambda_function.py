@@ -20,10 +20,11 @@ except Exception:
     Image = None
 
 try:
-    from checklist_loader import load_checklist, clear_cache
+    from checklist_loader import load_checklist, clear_cache, filter_disabled_items
 except ImportError:
     load_checklist = None
     clear_cache = None
+    filter_disabled_items = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -568,10 +569,10 @@ def get_item_ai_policy(item_id: str) -> dict:
     }
 
 
-def get_checklist_template(tenant_id="default"):
-    """Load checklist from DynamoDB with tenant fallback. Falls back to hardcoded."""
+def get_checklist_template(company_key="default"):
+    """Load checklist from DynamoDB with company overlay fallback. Falls back to hardcoded."""
     if load_checklist is not None:
-        template = load_checklist("eyewash", tenant_id)
+        template = load_checklist("eyewash", company_key)
         if template is not None:
             return template
     return copy.deepcopy(_FALLBACK_CHECKLIST)
@@ -915,8 +916,11 @@ def generate_s3_download_url(file_key: str) -> Optional[str]:
 
 def get_checklist(event: dict) -> dict:
     params = event.get("queryStringParameters") or {}
-    tenant_id = params.get("tenant_id", "default").strip() or "default"
-    return json_response(200, get_checklist_template(tenant_id))
+    company_key = params.get("company_key", params.get("tenant_id", "default")).strip() or "default"
+    template = get_checklist_template(company_key)
+    if filter_disabled_items is not None:
+        template = filter_disabled_items(template)
+    return json_response(200, template)
 
 
 
