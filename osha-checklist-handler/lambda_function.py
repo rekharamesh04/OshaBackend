@@ -969,7 +969,10 @@ def get_checklist_template_by_type(event):
 
     try:
         if load_checklist is not None:
-            template = load_checklist(checklist_type, company_key)
+            # Admin view always reads fresh from DynamoDB — bypasses Lambda in-memory cache
+            # so mutations (toggle-item, add-custom-item) are immediately visible even if
+            # a different Lambda container handled the write.
+            template = load_checklist(checklist_type, company_key, force_refresh=True)
             if template:
                 template["_source"] = "default" if company_key == "default" else "default + overlay"
                 template["_company_key"] = company_key

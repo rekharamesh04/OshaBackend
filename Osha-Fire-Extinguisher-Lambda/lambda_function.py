@@ -3221,7 +3221,7 @@ def analyze_item_image(event, _is_async=False):
         if qr_height_cm_raw is None:
             return _item2_fail(
                 "No QR height data received. The QR code may not be visible or readable in the image.",
-                "Place the printed OSHA height QR card clearly beside the extinguisher and retake.",
+                "Place the printed height QR code clearly beside the fire extinguisher and retake the photo.",
                 "No QR found. Place QR card beside extinguisher and retake.",
                 "no_qr_code", "qr_not_detected",
             )

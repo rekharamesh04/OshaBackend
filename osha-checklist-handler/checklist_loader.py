@@ -160,7 +160,7 @@ def filter_disabled_items(template):
     return result
 
 
-def load_checklist(checklist_type: str, company_key: str = "default") -> dict:
+def load_checklist(checklist_type: str, company_key: str = "default", force_refresh: bool = False) -> dict:
     """
     Fetch a checklist template from DynamoDB with company overlay merge.
 
@@ -170,10 +170,13 @@ def load_checklist(checklist_type: str, company_key: str = "default") -> dict:
     4. All items get is_enabled flag (true/false)
     5. Cache result in memory for warm Lambda reuse
 
+    Pass force_refresh=True to bypass cache (used by admin endpoints to always
+    return the latest data after mutations like toggle-item or add-custom-item).
+
     Returns None if default template not found (caller should fall back to hardcoded).
     """
     cache_key = f"{company_key}:{checklist_type}"
-    if cache_key in _CACHE:
+    if not force_refresh and cache_key in _CACHE:
         return copy.deepcopy(_CACHE[cache_key])
 
     try:
