@@ -1780,6 +1780,7 @@ def enforce_component_checks(
     reason: str,
     worker_message: str,
     suggested_action: Optional[str],
+    image_side: str = "",
 ) -> Tuple[bool, str, str, str, Optional[str]]:
     """
     Authoritative pass/fail enforcement for component items 7, 8, 9, 10.
@@ -2026,7 +2027,8 @@ def enforce_component_checks(
     # ── Item 10: Inspection Tag (with front/back support) ──────────────────
     if item == "10":
         # Determine if this is front or back analysis
-        _image_side = str(analysis.get("_image_side", "front")).strip().lower()
+        # FIX 4b: Use image_side from request body; fall back to AI analysis for backward compat
+        _image_side = image_side if image_side else str(analysis.get("_image_side", "front")).strip().lower()
         
         if _image_side == "back":
             # ── Back side enforcement ──────────────────────────────────────
@@ -3105,9 +3107,10 @@ def analyze_item_image(event, _is_async=False):
     logger.info("[TIMING] analyze_item_image START")
     body = parse_body(event)
     logger.info(
-        "[REQUEST] analyze called: inspection_id=%s item_id=%s has_file_key=%s has_image_base64=%s",
+        "[REQUEST] analyze called: inspection_id=%s item_id=%s image_side=%s has_file_key=%s has_image_base64=%s",
         body.get("inspection_id"),
         body.get("item_id"),
+        body.get("image_side", ""),
         bool(body.get("file_key") or body.get("fileKey")),
         bool(body.get("image_base64")),
     )
@@ -3115,6 +3118,7 @@ def analyze_item_image(event, _is_async=False):
     inspection_id     = str(body.get("inspection_id", "")).strip()
     item_id           = str(body.get("item_id", "")).strip()
     expected_location = str(body.get("expected_location", "")).strip()
+    image_side        = str(body.get("image_side", "")).strip().lower()
 
     if not inspection_id:
         return build_response(400, {"error": "inspection_id is required"})
@@ -3431,13 +3435,14 @@ def analyze_item_image(event, _is_async=False):
     )
     logger.info(f"[TIMING] after image extract/prepare: {time.time() - t0:.2f}s")
 
-    rule = checklist_rule_for_item(item_id, checklist_item)
+    rule = checklist_rule_for_item(item_id, checklist_item, image_side=image_side)
 
     # Build prompt
     if component_focus:
-        contract_text = component_check_contract(item_id)
+        effective_item_key = f"{item_id}_back" if str(item_id) == "10" and image_side == "back" else str(item_id)
+        contract_text = component_check_contract(effective_item_key)
         COMPONENT_TARGET_NAMES = {"8": "pressure gauge", "9": "instruction label", "10": "inspection tag", "10_back": "inspection tag back"}
-        target_name = COMPONENT_TARGET_NAMES.get(str(item_id), "component")
+        target_name = COMPONENT_TARGET_NAMES.get(effective_item_key, "component")
         prompt = (
             f"Checklist item to inspect (component close-up expected):\n"
             f"- item_id: {checklist_item['id']}\n"
@@ -3648,6 +3653,7 @@ def analyze_item_image(event, _is_async=False):
             reason=reason,
             worker_message=worker_message,
             suggested_action=suggested_action,
+            image_side=image_side,
         )
 
     # ── Hard safety guard — non-component items only ───────────────────────
@@ -3741,7 +3747,7 @@ def analyze_item_image(event, _is_async=False):
         low_confidence = confidence < IMAGE_CONFIDENCE_BLOCK_THRESHOLD
 
     blocked = wrong_image or low_confidence
-    zoom_hint = item_zoom_hint(item_id)
+    zoom_hint = item_zoom_hint(item_id, image_side=image_side)
     blocked_suggested_action = (
         suggested_action or
         (f"{zoom_hint} Remove obstruction and retake." if zoom_hint else "Point the camera directly at the fire extinguisher and retake.")
