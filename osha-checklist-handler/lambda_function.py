@@ -30,11 +30,17 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 try:
-    from checklist_loader import load_checklist, clear_cache, filter_disabled_items
+    from checklist_loader import (
+        load_checklist, clear_cache, filter_disabled_items,
+        get_company_config, save_company_config, VALID_BLOCKED_LABELS,
+    )
 except ImportError:
     load_checklist = None
     clear_cache = None
     filter_disabled_items = None
+    get_company_config = None
+    save_company_config = None
+    VALID_BLOCKED_LABELS = {"need_review", "fail"}
 
 # Initialize DynamoDB
 dynamodb = boto3.resource("dynamodb")
@@ -1354,6 +1360,75 @@ def lambda_handler(event, context):
     elif http_method == "DELETE" and resource == "/checklist-template/{checklist_type}":
         return delete_checklist_template(event)
 
+    # ── Company Config (Blocked Verdict Label) ──
+    elif http_method == "GET" and resource == "/company-config/{company_key}":
+        return handle_get_company_config(event)
+
+    elif http_method == "PUT" and resource == "/company-config/{company_key}":
+        return handle_put_company_config(event)
+
     else:
         return build_response(404, {"error": f"Route not found: {http_method} {resource}"})
+
+
+# ─────────────────────────────────────────────
+# Company Config: GET /company-config/{company_key}
+# ─────────────────────────────────────────────
+def handle_get_company_config(event):
+    """
+    Returns the company-level configuration.
+    Currently includes: blocked_verdict_label ("need_review" or "fail").
+    """
+    path_params = event.get("pathParameters") or {}
+    company_key = str(path_params.get("company_key", "")).strip()
+
+    if not company_key:
+        return build_response(400, {"error": "company_key is required"})
+
+    if get_company_config is None:
+        return build_response(500, {"error": "checklist_loader not available"})
+
+    config = get_company_config(company_key)
+    return build_response(200, {
+        "company_key": company_key,
+        "blocked_verdict_label": config.get("blocked_verdict_label", "need_review"),
+    })
+
+
+# ─────────────────────────────────────────────
+# Company Config: PUT /company-config/{company_key}
+# ─────────────────────────────────────────────
+def handle_put_company_config(event):
+    """
+    Updates the company-level configuration.
+    Body: { "blocked_verdict_label": "fail" | "need_review" }
+    """
+    path_params = event.get("pathParameters") or {}
+    company_key = str(path_params.get("company_key", "")).strip()
+
+    if not company_key:
+        return build_response(400, {"error": "company_key is required"})
+
+    try:
+        body = json.loads(event.get("body", "{}"))
+    except json.JSONDecodeError:
+        return build_response(400, {"error": "Invalid JSON"})
+
+    label = str(body.get("blocked_verdict_label", "")).strip().lower()
+
+    if label not in VALID_BLOCKED_LABELS:
+        return build_response(400, {
+            "error": f"blocked_verdict_label must be one of: {sorted(VALID_BLOCKED_LABELS)}",
+        })
+
+    if save_company_config is None:
+        return build_response(500, {"error": "checklist_loader not available"})
+
+    result = save_company_config(company_key, label)
+    return build_response(200, {
+        "message": f"Company config updated for '{company_key}'",
+        "company_key": company_key,
+        "blocked_verdict_label": result["blocked_verdict_label"],
+        "updated_at": result["updated_at"],
+    })
 

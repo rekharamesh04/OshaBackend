@@ -263,6 +263,68 @@ def get_default_item_ids(checklist_type: str) -> set:
         return set()
 
 
+_CONFIG_CACHE = {}   # company_key → config dict
+
+COMPANY_CONFIG_SK = "__company_config__"
+
+# Valid values for blocked_verdict_label
+VALID_BLOCKED_LABELS = {"need_review", "fail"}
+
+
+def get_company_config(company_key: str) -> dict:
+    """
+    Get company-level configuration from DynamoDB.
+    Returns dict with at least: {"blocked_verdict_label": "need_review"|"fail"}
+    Defaults to "need_review" if no config exists.
+    """
+    if company_key in _CONFIG_CACHE:
+        return copy.deepcopy(_CONFIG_CACHE[company_key])
+
+    default_config = {"blocked_verdict_label": "need_review"}
+    if not company_key or company_key == "default":
+        return default_config
+
+    try:
+        table = _get_table()
+        item = _fetch_item(table, company_key, COMPANY_CONFIG_SK)
+        if item:
+            config = {
+                "blocked_verdict_label": item.get("blocked_verdict_label", "need_review"),
+            }
+            _CONFIG_CACHE[company_key] = config
+            return copy.deepcopy(config)
+    except Exception as e:
+        logger.warning("Failed to load company config for '%s': %s", company_key, e)
+
+    return default_config
+
+
+def save_company_config(company_key: str, blocked_verdict_label: str) -> dict:
+    """
+    Save company-level configuration to DynamoDB.
+    blocked_verdict_label must be "need_review" or "fail".
+    Returns the saved config dict.
+    """
+    from datetime import datetime, timezone
+    table = _get_table()
+    now = datetime.now(timezone.utc).isoformat()
+
+    item = {
+        "tenant_id": company_key,
+        "checklist_type": COMPANY_CONFIG_SK,
+        "blocked_verdict_label": blocked_verdict_label,
+        "updated_at": now,
+    }
+    table.put_item(Item=item)
+
+    # Update cache
+    config = {"blocked_verdict_label": blocked_verdict_label}
+    _CONFIG_CACHE[company_key] = config
+
+    return {"blocked_verdict_label": blocked_verdict_label, "updated_at": now}
+
+
 def clear_cache():
     """Clear the in-memory cache. Useful after CRUD updates or for testing."""
     _CACHE.clear()
+    _CONFIG_CACHE.clear()

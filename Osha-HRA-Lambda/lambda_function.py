@@ -18,11 +18,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 try:
-    from checklist_loader import load_checklist, clear_cache, filter_disabled_items
+    from checklist_loader import load_checklist, clear_cache, filter_disabled_items, get_company_config
 except ImportError:
     load_checklist = None
     clear_cache = None
     filter_disabled_items = None
+    get_company_config = None
 
 # Initialize DynamoDB
 dynamodb = boto3.resource("dynamodb")

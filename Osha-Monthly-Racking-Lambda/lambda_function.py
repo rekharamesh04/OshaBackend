@@ -83,11 +83,12 @@ VALID_OBJECTS = {
 EXPECTED_API_KEY = os.getenv("API_KEY", "").strip()
 
 try:
-    from checklist_loader import load_checklist, clear_cache, filter_disabled_items
+    from checklist_loader import load_checklist, clear_cache, filter_disabled_items, get_company_config
 except ImportError:
     load_checklist = None
     clear_cache = None
     filter_disabled_items = None
+    get_company_config = None
 
 
 # ─────────────────────────────────────────────
@@ -1039,6 +1040,17 @@ def analyze_item_image(event):
         inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
         inspection["updated_at"] = now_iso()
         save_inspection(inspection)
+
+        # Resolve company-level blocked verdict label
+        _company_key = str(body.get("company_key", "")).strip()
+        _verdict_label = "need_review"
+        if _company_key and get_company_config:
+            try:
+                _cfg = get_company_config(_company_key)
+                _verdict_label = _cfg.get("blocked_verdict_label", "need_review")
+            except Exception:
+                pass
+
         return build_response(200, {
             "inspection_id": inspection.get("inspection_id", inspection_id),
             "item_id": item_id,
@@ -1048,6 +1060,7 @@ def analyze_item_image(event):
             "object_detected": best.get("object_detected"),
             "condition_checked": best.get("condition_checked"),
             "confidence": best.get("confidence"),
+            "blocked_verdict_label": _verdict_label,
             "message": best.get("worker_message") or "Checklist item is not clearly visible.",
             "reason": best.get("reason"),
             "suggested_action": best.get("suggested_action"),
