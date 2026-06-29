@@ -276,10 +276,8 @@ def get_company_config(company_key: str) -> dict:
     Get company-level configuration from DynamoDB.
     Returns dict with at least: {"blocked_verdict_label": "need_review"|"fail"}
     Defaults to "need_review" if no config exists.
+    Always reads fresh from DynamoDB (no cache) to avoid stale config across Lambdas.
     """
-    if company_key in _CONFIG_CACHE:
-        return copy.deepcopy(_CONFIG_CACHE[company_key])
-
     default_config = {"blocked_verdict_label": "need_review"}
     if not company_key or company_key == "default":
         return default_config
@@ -288,11 +286,9 @@ def get_company_config(company_key: str) -> dict:
         table = _get_table()
         item = _fetch_item(table, company_key, COMPANY_CONFIG_SK)
         if item:
-            config = {
+            return {
                 "blocked_verdict_label": item.get("blocked_verdict_label", "need_review"),
             }
-            _CONFIG_CACHE[company_key] = config
-            return copy.deepcopy(config)
     except Exception as e:
         logger.warning("Failed to load company config for '%s': %s", company_key, e)
 
