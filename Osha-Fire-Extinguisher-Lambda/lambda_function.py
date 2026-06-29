@@ -3867,7 +3867,18 @@ def analyze_item_image(event, _is_async=False):
     item11, _, _ = find_item(inspection, "11")
     item12, _, _ = find_item(inspection, "12")
 
-    return build_response(200, {
+    # Resolve company-level verdict label for non-pass results
+    _verdict_label_final = None
+    if not passed:
+        _ck = str(body.get("company_key", "")).strip()
+        _verdict_label_final = "need_review"
+        if _ck and get_company_config:
+            try:
+                _verdict_label_final = get_company_config(_ck).get("blocked_verdict_label", "need_review")
+            except Exception:
+                pass
+
+    resp_body = {
         "inspection_id":      inspection_id,
         "item_id":            item_id,
         "blocked":            False,
@@ -3887,7 +3898,11 @@ def analyze_item_image(event, _is_async=False):
         "next_item_index":    inspection.get("current_item_index", 0),
         "inspection":         inspection,
         "categories":         inspection.get("categories", []),
-    })
+    }
+    if _verdict_label_final is not None:
+        resp_body["blocked_verdict_label"] = _verdict_label_final
+
+    return build_response(200, resp_body)
 
 
 # ═══════════════════════════════════════════════════════════════

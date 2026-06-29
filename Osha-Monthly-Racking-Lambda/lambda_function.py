@@ -1090,7 +1090,18 @@ def analyze_item_image(event):
     inspection["updated_at"] = now_iso()
     save_inspection(inspection)
 
-    return build_response(200, {
+    # Resolve company-level verdict label for non-pass results
+    _verdict_label_final = None
+    if not passed_overall:
+        _ck = str(body.get("company_key", "")).strip()
+        _verdict_label_final = "need_review"
+        if _ck and get_company_config:
+            try:
+                _verdict_label_final = get_company_config(_ck).get("blocked_verdict_label", "need_review")
+            except Exception:
+                pass
+
+    resp_body = {
         "inspection_id": inspection.get("inspection_id", inspection_id),
         "item_id": item_id,
         "blocked": False,
@@ -1111,7 +1122,11 @@ def analyze_item_image(event):
         "current_item_index": inspection.get("current_item_index", 0),
         "inspection": inspection,
         "categories": inspection.get("categories", []),
-    })
+    }
+    if _verdict_label_final is not None:
+        resp_body["blocked_verdict_label"] = _verdict_label_final
+
+    return build_response(200, resp_body)
 
 
 def batch_analyze_items(event):
