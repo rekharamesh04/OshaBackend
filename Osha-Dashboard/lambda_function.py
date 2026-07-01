@@ -37,10 +37,19 @@ import os
 import re
 import uuid
 import logging
-from datetime import datetime, timezone
+import time as _time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
+from boto3.dynamodb.conditions import Key, Attr
+
+# ─────────────────────────────────────────────
+# Lambda In-Memory Cache (survives container reuse)
+# ─────────────────────────────────────────────
+_DASHBOARD_CACHE = {"data": None, "ts": 0}
+_CACHE_TTL = 30  # seconds
 
 # ─────────────────────────────────────────────
 # Logging
@@ -178,120 +187,145 @@ def scan_full_table(ddb_table):
     return items
 
 
+def parallel_scan_table(ddb_table, total_segments=4, **extra_kwargs):
+    """Parallel segmented scan — splits the table read across N threads."""
+    all_items = []
+
+    def _scan_segment(segment):
+        items = []
+        kwargs = {"TotalSegments": total_segments, "Segment": segment}
+        kwargs.update(extra_kwargs)
+        resp = ddb_table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        while "LastEvaluatedKey" in resp:
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+            resp = ddb_table.scan(**kwargs)
+            items.extend(resp.get("Items", []))
+        return items
+
+    with ThreadPoolExecutor(max_workers=total_segments) as executor:
+        futures = [executor.submit(_scan_segment, i) for i in range(total_segments)]
+        for future in as_completed(futures):
+            all_items.extend(future.result())
+
+    return all_items
+
+
+def _load_dashboard_items_cached():
+    """Return all dashboard table items with 30-second in-memory cache.
+    On Lambda container reuse this avoids re-scanning the table on every request."""
+    global _DASHBOARD_CACHE
+    now = _time.time()
+    if _DASHBOARD_CACHE["data"] is not None and (now - _DASHBOARD_CACHE["ts"]) < _CACHE_TTL:
+        return _DASHBOARD_CACHE["data"]
+
+    items = convert_decimals(parallel_scan_table(dashboard_table, total_segments=4))
+    _DASHBOARD_CACHE = {"data": items, "ts": now}
+    return items
+
+
+def _invalidate_dashboard_cache():
+    """Clear the in-memory dashboard cache after any write operation."""
+    global _DASHBOARD_CACHE
+    _DASHBOARD_CACHE = {"data": None, "ts": 0}
+
+
+def _extract_location_key_from_station_id(station_id):
+    """Extract location_key from station_id format: {location_key}-{type_key}-{6hex}.
+    Returns None if the format is unrecognized."""
+    type_keys = sorted(
+        ["eyewash", "fire", "exitdoor", "racking", "hra", "recordkeeping"],
+        key=len, reverse=True,
+    )
+    if not station_id or len(station_id) < 8:
+        return None
+    prefix = station_id[:-7]  # strip "-{6hex}"
+    for tk in type_keys:
+        suffix = f"-{tk}"
+        if prefix.endswith(suffix):
+            return prefix[:-len(suffix)]
+    return None
+
+
 # ═══════════════════════════════════════════════
 # RESELLER API 1: GET /api/resellers — Full Nested Tree
 # ═══════════════════════════════════════════════
 def get_resellers(event):
     """
     Returns the full Reseller → Company → Location → StationType → Station tree.
-    This is the primary endpoint for the sidebar navigation.
+    OPTIMIZED: Uses parallel scan + in-memory cache (30s TTL).
     """
-    all_items = convert_decimals(scan_full_table(dashboard_table))
+    all_items = _load_dashboard_items_cached()
 
-    # Separate items by type
-    resellers = {}         # reseller_key → reseller dict
-    reseller_companies = {}  # reseller_key → [company_key, ...]
-    companies = {}         # company_key → company dict
-    locations = {}         # company_key → [location dicts]
-    stations = {}          # location_key → [station dicts]
+    resellers = {}
+    reseller_companies = {}
+    companies = {}
+    locations = {}
+    stations = {}
+    _st_type_keys = {st["key"] for st in STATION_TYPES}
 
     for item in all_items:
         pk = item.get("PK", "")
         sk = item.get("SK", "")
 
-        if sk == "METADATA" and pk.startswith("RESELLER#"):
-            rk = pk.replace("RESELLER#", "")
-            resellers[rk] = {
-                "key": rk,
-                "name": item.get("name", ""),
-                "companies": [],
-            }
+        if pk.startswith("RESELLER#"):
+            rk = pk[9:]  # len("RESELLER#") == 9
+            if sk == "METADATA":
+                resellers[rk] = {"key": rk, "name": item.get("name", ""), "companies": []}
+            elif sk.startswith("COMPANY#"):
+                reseller_companies.setdefault(rk, []).append(sk[8:])
 
-        elif sk.startswith("COMPANY#") and pk.startswith("RESELLER#"):
-            rk = pk.replace("RESELLER#", "")
-            ck = sk.replace("COMPANY#", "")
-            reseller_companies.setdefault(rk, []).append(ck)
+        elif pk.startswith("COMPANY#"):
+            ck = pk[8:]
+            if sk == "METADATA":
+                companies[ck] = {"key": ck, "name": item.get("name", ""), "state": item.get("state", ""), "locations": []}
+            elif sk.startswith("LOCATION#"):
+                lk = sk[9:]
+                locations.setdefault(ck, []).append({
+                    "key": lk, "name": item.get("name", ""),
+                    "state": item.get("state", ""), "address": item.get("address", ""),
+                    "city": item.get("city", ""), "zip": item.get("zip", ""),
+                    "phone": item.get("phone", ""),
+                })
 
-        elif sk == "METADATA" and pk.startswith("COMPANY#"):
-            ck = pk.replace("COMPANY#", "")
-            companies[ck] = {
-                "key": ck,
-                "name": item.get("name", ""),
-                "state": item.get("state", ""),
-                "locations": [],
-            }
-
-        elif sk.startswith("LOCATION#") and pk.startswith("COMPANY#"):
-            ck = pk.replace("COMPANY#", "")
-            lk = sk.replace("LOCATION#", "")
-            loc = {
-                "key": lk,
-                "name": item.get("name", ""),
-                "state": item.get("state", ""),
-                "address": item.get("address", ""),
-                "city": item.get("city", ""),
-                "zip": item.get("zip", ""),
-                "phone": item.get("phone", ""),
-                "_company_key": ck,
-            }
-            locations.setdefault(ck, []).append(loc)
-
-        elif sk.startswith("STATION#") and pk.startswith("LOCATION#"):
-            lk = pk.replace("LOCATION#", "")
-            station = {
-                "id": item.get("station_id", sk.replace("STATION#", "")),
-                "name": item.get("name", ""),
-                "route": item.get("route", ""),
+        elif pk.startswith("LOCATION#") and sk.startswith("STATION#"):
+            lk = pk[9:]
+            stations.setdefault(lk, []).append({
+                "id": item.get("station_id", sk[8:]),
+                "name": item.get("name", ""), "route": item.get("route", ""),
                 "status": item.get("status", "ok"),
                 "lastInspected": item.get("lastInspected", ""),
                 "nextDue": item.get("nextDue", ""),
-                "notes": item.get("notes", ""),
-                "typeKey": item.get("typeKey", ""),
-                "_location_key": lk,
-            }
-            stations.setdefault(lk, []).append(station)
-
-    # Helper: build location with nested station types
-    def _build_location(loc):
-        loc_key = loc["key"]
-        loc_stations = stations.get(loc_key, [])
-        station_types = []
-        for st_type in STATION_TYPES:
-            type_stations = [
-                {k: v for k, v in s.items() if not k.startswith("_")}
-                for s in loc_stations
-                if s.get("typeKey") == st_type["key"]
-            ]
-            station_types.append({
-                "key": st_type["key"],
-                "label": st_type["label"],
-                "icon": st_type["icon"],
-                "stations": type_stations,
+                "notes": item.get("notes", ""), "typeKey": item.get("typeKey", ""),
             })
-        clean_loc = {k: v for k, v in loc.items() if not k.startswith("_")}
-        clean_loc["stationTypes"] = station_types
-        return clean_loc
 
-    # Helper: build company with nested locations
+    def _build_location(loc):
+        lk = loc["key"]
+        loc_stations = stations.get(lk, [])
+        type_buckets = {tk: [] for tk in _st_type_keys}
+        for s in loc_stations:
+            tk = s.get("typeKey", "")
+            if tk in type_buckets:
+                type_buckets[tk].append(s)
+        loc_copy = {k: v for k, v in loc.items()}
+        loc_copy["stationTypes"] = [
+            {"key": st["key"], "label": st["label"], "icon": st["icon"], "stations": type_buckets.get(st["key"], [])}
+            for st in STATION_TYPES
+        ]
+        return loc_copy
+
     def _build_company(ck):
         company = companies.get(ck)
         if not company:
             return None
-        company_copy = {
-            "key": company["key"],
-            "name": company["name"],
-            "state": company["state"],
-            "locations": [],
+        return {
+            "key": company["key"], "name": company["name"], "state": company["state"],
+            "locations": [_build_location(loc) for loc in locations.get(ck, [])],
         }
-        for loc in locations.get(ck, []):
-            company_copy["locations"].append(_build_location(loc))
-        return company_copy
 
-    # Build the full reseller tree
     result = []
     for rk, reseller in resellers.items():
-        company_keys = reseller_companies.get(rk, [])
-        for ck in company_keys:
+        for ck in reseller_companies.get(rk, []):
             built = _build_company(ck)
             if built:
                 reseller["companies"].append(built)
@@ -324,6 +358,7 @@ def create_reseller(event):
         "created_at": now_iso(),
     }
     dashboard_table.put_item(Item=item)
+    _invalidate_dashboard_cache()
 
     return build_response(201, {"key": key, "name": name, "companies": []})
 
@@ -354,6 +389,7 @@ def update_reseller(event):
         ExpressionAttributeNames={"#name": "name", "#updated_at": "updated_at"},
         ExpressionAttributeValues={":name": new_name, ":updated_at": now_iso()},
     )
+    _invalidate_dashboard_cache()
 
     return build_response(200, {"key": reseller_key, "name": new_name})
 
@@ -365,6 +401,7 @@ def delete_reseller(event):
     """
     Deletes a reseller and CASCADE-DELETES all associated companies,
     their locations, and their stations.
+    OPTIMIZED: Uses targeted DynamoDB queries by PK instead of full table scan.
     """
     path_params = event.get("pathParameters") or {}
     reseller_key = str(path_params.get("reseller_key", "")).strip()
@@ -376,46 +413,43 @@ def delete_reseller(event):
     if not existing:
         return build_response(404, {"error": f"Reseller '{reseller_key}' not found"})
 
-    all_items = scan_full_table(dashboard_table)
-
-    # Find all company keys associated with this reseller
+    # Query company associations under this reseller (PK=RESELLER#rk, SK begins_with COMPANY#)
+    assoc_resp = dashboard_table.query(
+        KeyConditionExpression=Key("PK").eq(f"RESELLER#{reseller_key}") & Key("SK").begins_with("COMPANY#"),
+    )
     company_keys = []
-    for item in all_items:
-        if item.get("PK") == f"RESELLER#{reseller_key}" and item.get("SK", "").startswith("COMPANY#"):
-            ck = item["SK"].replace("COMPANY#", "")
-            company_keys.append(ck)
-            # Delete the association record
-            dashboard_table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
+    for assoc in assoc_resp.get("Items", []):
+        ck = assoc["SK"][8:]  # strip "COMPANY#"
+        company_keys.append(ck)
+        dashboard_table.delete_item(Key={"PK": assoc["PK"], "SK": assoc["SK"]})
 
-    # Cascade: delete each company and its children
     deleted_companies = []
     deleted_locations = []
     deleted_stations = []
 
     for ck in company_keys:
-        # Find locations for this company
-        loc_keys = []
-        for item in all_items:
-            if item.get("PK") == f"COMPANY#{ck}" and item.get("SK", "").startswith("LOCATION#"):
-                lk = item["SK"].replace("LOCATION#", "")
-                loc_keys.append(lk)
-                dashboard_table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
-                deleted_locations.append(lk)
+        # Query locations under this company
+        loc_resp = dashboard_table.query(
+            KeyConditionExpression=Key("PK").eq(f"COMPANY#{ck}") & Key("SK").begins_with("LOCATION#"),
+        )
+        for loc_item in loc_resp.get("Items", []):
+            lk = loc_item["SK"][9:]
+            deleted_locations.append(lk)
+            dashboard_table.delete_item(Key={"PK": loc_item["PK"], "SK": loc_item["SK"]})
 
-        # Delete stations under those locations
-        for item in all_items:
-            if item.get("PK", "").startswith("LOCATION#") and item.get("SK", "").startswith("STATION#"):
-                lk = item["PK"].replace("LOCATION#", "")
-                if lk in loc_keys:
-                    dashboard_table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
-                    deleted_stations.append(item.get("station_id", ""))
+            # Query stations under this location
+            st_resp = dashboard_table.query(
+                KeyConditionExpression=Key("PK").eq(f"LOCATION#{lk}") & Key("SK").begins_with("STATION#"),
+            )
+            for st_item in st_resp.get("Items", []):
+                dashboard_table.delete_item(Key={"PK": st_item["PK"], "SK": st_item["SK"]})
+                deleted_stations.append(st_item.get("station_id", ""))
 
-        # Delete the company itself
         dashboard_table.delete_item(Key={"PK": f"COMPANY#{ck}", "SK": "METADATA"})
         deleted_companies.append(ck)
 
-    # Delete the reseller itself
     dashboard_table.delete_item(Key={"PK": f"RESELLER#{reseller_key}", "SK": "METADATA"})
+    _invalidate_dashboard_cache()
 
     return build_response(200, {
         "message": "Reseller deleted successfully (cascade)",
@@ -433,47 +467,44 @@ def delete_reseller(event):
 def get_companies(event):
     """
     Returns the full Company → Location → StationType → Station tree.
-    This is the primary endpoint for the sidebar navigation.
+    OPTIMIZED: Uses parallel scan + in-memory cache (30s TTL).
     """
-    all_items = convert_decimals(scan_full_table(dashboard_table))
+    all_items = _load_dashboard_items_cached()
 
-    # Separate items by type
-    companies = {}   # key → company dict
-    locations = {}   # company_key → [location dicts]
-    stations = {}    # location_key → [station dicts]
+    companies = {}
+    locations = {}
+    stations = {}
 
+    # Single pass — classify every item
     for item in all_items:
         pk = item.get("PK", "")
         sk = item.get("SK", "")
 
-        if sk == "METADATA" and pk.startswith("COMPANY#"):
-            company_key = pk.replace("COMPANY#", "")
-            companies[company_key] = {
-                "key": company_key,
-                "name": item.get("name", ""),
-                "state": item.get("state", ""),
-                "locations": [],
-            }
+        if pk.startswith("COMPANY#"):
+            ck = pk[8:]  # len("COMPANY#") == 8
+            if sk == "METADATA":
+                companies[ck] = {
+                    "key": ck,
+                    "name": item.get("name", ""),
+                    "state": item.get("state", ""),
+                    "locations": [],
+                }
+            elif sk.startswith("LOCATION#"):
+                lk = sk[9:]  # len("LOCATION#") == 9
+                locations.setdefault(ck, []).append({
+                    "key": lk,
+                    "name": item.get("name", ""),
+                    "state": item.get("state", ""),
+                    "address": item.get("address", ""),
+                    "city": item.get("city", ""),
+                    "zip": item.get("zip", ""),
+                    "phone": item.get("phone", ""),
+                })
 
-        elif sk.startswith("LOCATION#") and pk.startswith("COMPANY#"):
-            company_key = pk.replace("COMPANY#", "")
-            location_key = sk.replace("LOCATION#", "")
-            loc = {
-                "key": location_key,
-                "name": item.get("name", ""),
-                "state": item.get("state", ""),
-                "address": item.get("address", ""),
-                "city": item.get("city", ""),
-                "zip": item.get("zip", ""),
-                "phone": item.get("phone", ""),
-                "_company_key": company_key,
-            }
-            locations.setdefault(company_key, []).append(loc)
-
-        elif sk.startswith("STATION#") and pk.startswith("LOCATION#"):
-            location_key = pk.replace("LOCATION#", "")
-            station = {
-                "id": item.get("station_id", sk.replace("STATION#", "")),
+        elif pk.startswith("LOCATION#") and sk.startswith("STATION#"):
+            lk = pk[9:]
+            stations.setdefault(lk, []).append({
+                "id": item.get("station_id", sk[8:]),
                 "name": item.get("name", ""),
                 "route": item.get("route", ""),
                 "status": item.get("status", "ok"),
@@ -481,38 +512,37 @@ def get_companies(event):
                 "nextDue": item.get("nextDue", ""),
                 "notes": item.get("notes", ""),
                 "typeKey": item.get("typeKey", ""),
-                "_location_key": location_key,
-            }
-            stations.setdefault(location_key, []).append(station)
+            })
 
-    # Build the nested tree
+    # Pre-index stations by (location_key, typeKey) for O(1) grouping
+    _st_type_keys = {st["key"] for st in STATION_TYPES}
+
     result = []
-    for company_key, company in companies.items():
-        company_locations = locations.get(company_key, [])
+    for ck, company in companies.items():
+        for loc in locations.get(ck, []):
+            lk = loc["key"]
+            loc_stations = stations.get(lk, [])
 
-        for loc in company_locations:
-            loc_key = loc["key"]
-            loc_stations = stations.get(loc_key, [])
+            # Group by typeKey (pre-bucket to avoid N*M loop)
+            type_buckets = {tk: [] for tk in _st_type_keys}
+            for s in loc_stations:
+                tk = s.get("typeKey", "")
+                if tk in type_buckets:
+                    type_buckets[tk].append(s)
 
-            # Group stations by typeKey into the 5 fixed categories
-            station_types = []
-            for st_type in STATION_TYPES:
-                type_stations = [
-                    {k: v for k, v in s.items() if not k.startswith("_")}
-                    for s in loc_stations
-                    if s.get("typeKey") == st_type["key"]
-                ]
-                station_types.append({
-                    "key": st_type["key"],
-                    "label": st_type["label"],
-                    "icon": st_type["icon"],
-                    "stations": type_stations,
-                })
+            station_types = [
+                {
+                    "key": st["key"],
+                    "label": st["label"],
+                    "icon": st["icon"],
+                    "stations": type_buckets.get(st["key"], []),
+                }
+                for st in STATION_TYPES
+            ]
 
-            # Remove internal keys
-            clean_loc = {k: v for k, v in loc.items() if not k.startswith("_")}
-            clean_loc["stationTypes"] = station_types
-            company["locations"].append(clean_loc)
+            loc_copy = {k: v for k, v in loc.items()}
+            loc_copy["stationTypes"] = station_types
+            company["locations"].append(loc_copy)
 
         result.append(company)
 
@@ -561,6 +591,8 @@ def create_company(event):
             "SK": f"COMPANY#{key}",
             "associated_at": now_iso(),
         })
+
+    _invalidate_dashboard_cache()
 
     return build_response(201, {
         "key": key,
@@ -625,6 +657,8 @@ def create_location(event):
         {"key": st["key"], "label": st["label"], "icon": st["icon"], "stations": []}
         for st in STATION_TYPES
     ]
+
+    _invalidate_dashboard_cache()
 
     return build_response(201, {
         "key": location_key,
@@ -710,6 +744,8 @@ def create_station(event):
     }
     dashboard_table.put_item(Item=item)
 
+    _invalidate_dashboard_cache()
+
     return build_response(201, {
         "id": station_id,
         "name": name,
@@ -724,8 +760,56 @@ def create_station(event):
 # ═══════════════════════════════════════════════
 # API 5: PUT /api/stations/{station_id} — Update Station
 # ═══════════════════════════════════════════════
+def _find_station_by_id(station_id):
+    """Locate a station item by station_id using the fastest available method:
+    1) StationIdIndex GSI query (O(1), requires GSI to be active)
+    2) Direct get_item via parsed location_key from station_id format
+    3) Filtered scan fallback (slowest)
+    """
+    # Strategy 1: GSI query — guaranteed O(1) if GSI exists
+    try:
+        gsi_resp = dashboard_table.query(
+            IndexName="StationIdIndex",
+            KeyConditionExpression=Key("station_id").eq(station_id),
+            Limit=1,
+        )
+        gsi_items = gsi_resp.get("Items", [])
+        if gsi_items:
+            return gsi_items[0]
+    except Exception as gsi_err:
+        err_code = getattr(gsi_err, "response", {}).get("Error", {}).get("Code", "")
+        if err_code == "ValidationException" and "StationIdIndex" in str(gsi_err):
+            pass  # GSI not yet created
+        else:
+            logger.warning(f"StationIdIndex query failed: {gsi_err}")
+
+    # Strategy 2: parse station_id format → direct get_item
+    location_key = _extract_location_key_from_station_id(station_id)
+    if location_key:
+        result = dashboard_table.get_item(
+            Key={"PK": f"LOCATION#{location_key}", "SK": f"STATION#{station_id}"}
+        )
+        item = result.get("Item")
+        if item:
+            return item
+
+    # Strategy 3: filtered scan fallback
+    resp = dashboard_table.scan(
+        FilterExpression=Attr("SK").eq(f"STATION#{station_id}") & Attr("PK").begins_with("LOCATION#"),
+    )
+    items = resp.get("Items", [])
+    while not items and "LastEvaluatedKey" in resp:
+        resp = dashboard_table.scan(
+            FilterExpression=Attr("SK").eq(f"STATION#{station_id}") & Attr("PK").begins_with("LOCATION#"),
+            ExclusiveStartKey=resp["LastEvaluatedKey"],
+        )
+        items = resp.get("Items", [])
+    return items[0] if items else None
+
+
 def update_station(event):
-    """Updates a station's status, notes, dates, or name."""
+    """Updates a station's status, notes, dates, or name.
+    OPTIMIZED: Uses StationIdIndex GSI → parsed get_item → scan fallback."""
     path_params = event.get("pathParameters") or {}
     station_id = path_params.get("station_id", "")
     body = parse_body(event)
@@ -733,14 +817,7 @@ def update_station(event):
     if not station_id:
         return build_response(400, {"error": "station_id is required in URL path"})
 
-    # Find the station by scanning (since we need the PK to update)
-    # In production, you'd use a GSI on station_id for O(1) lookup
-    all_items = scan_full_table(dashboard_table)
-    station_item = None
-    for item in all_items:
-        if item.get("SK") == f"STATION#{station_id}" and item.get("PK", "").startswith("LOCATION#"):
-            station_item = item
-            break
+    station_item = _find_station_by_id(station_id)
 
     if not station_item:
         return build_response(404, {"error": f"Station '{station_id}' not found"})
@@ -773,9 +850,9 @@ def update_station(event):
         ExpressionAttributeValues=attr_values,
     )
 
-    # Return updated station
     updated = dashboard_table.get_item(Key={"PK": station_item["PK"], "SK": station_item["SK"]}).get("Item", {})
     updated = convert_decimals(updated)
+    _invalidate_dashboard_cache()
 
     return build_response(200, {
         "id": updated.get("station_id", station_id),
@@ -792,8 +869,9 @@ def update_station(event):
 # API 6: GET /api/alerts — Stations with Issues
 # ═══════════════════════════════════════════════
 def get_alerts(event):
-    """Returns all stations where status is 'warn' or 'fail', enriched with reseller/company/location context."""
-    all_items = convert_decimals(scan_full_table(dashboard_table))
+    """Returns all stations where status is 'warn' or 'fail', enriched with reseller/company/location context.
+    OPTIMIZED: Uses parallel scan + in-memory cache."""
+    all_items = _load_dashboard_items_cached()
 
     # Build lookup maps
     resellers = {}               # reseller_key → {name}
@@ -879,12 +957,17 @@ def admin_list_inspections(event):
     Returns a unified list of ALL inspections from all 6 types,
     with computed status, evidence count, and aggregate stats.
 
+    OPTIMIZED:
+      1. Server-side FilterExpression for date_of_audit and location/facility_area
+         → DynamoDB filters BEFORE sending data over the network
+      2. Parallel scan across 6 tables (6 threads)
+      3. Reduced Python-side filtering (already done by DynamoDB)
+
     Query Parameters (all optional):
         location    — Filter by facility_area (case-insensitive)
         start_date  — Filter inspections on or after this date (YYYY-MM-DD)
         end_date    — Filter inspections on or before this date (YYYY-MM-DD)
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     try:
         params = event.get("queryStringParameters", {}) or {}
         filter_location = str(params.get("location", "") or "").strip()
@@ -893,11 +976,88 @@ def admin_list_inspections(event):
 
         all_inspections = []
 
-        # Scan all 5 tables in PARALLEL to avoid timeout
-        def _scan_table(type_label, ddb_table):
+        def _query_or_scan_table(type_label, ddb_table):
+            """Use GSI query() when location filter is present, otherwise scan with FilterExpression.
+            The LocationDateIndex GSI (PK=facility_area, SK=date_of_audit) enables
+            O(K) reads instead of O(N) full table scans."""
             try:
-                items = convert_decimals(scan_full_table(ddb_table))
-                logger.info(f"[ADMIN] Scanned {type_label}: {len(items)} items")
+                items = []
+
+                # FAST PATH: GSI query when location + date filters are provided
+                if filter_location and (filter_start or filter_end):
+                    try:
+                        kce = Key("facility_area").eq(filter_location)
+                        if filter_start and filter_end:
+                            kce = kce & Key("date_of_audit").between(filter_start, filter_end)
+                        elif filter_start:
+                            kce = kce & Key("date_of_audit").gte(filter_start)
+                        else:
+                            kce = kce & Key("date_of_audit").lte(filter_end)
+
+                        query_kwargs = {
+                            "IndexName": "LocationDateIndex",
+                            "KeyConditionExpression": kce,
+                        }
+                        resp = ddb_table.query(**query_kwargs)
+                        items.extend(resp.get("Items", []))
+                        while "LastEvaluatedKey" in resp:
+                            query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+                            resp = ddb_table.query(**query_kwargs)
+                            items.extend(resp.get("Items", []))
+
+                        items = convert_decimals(items)
+                        logger.info(f"[ADMIN] GSI query {type_label}: {len(items)} items")
+                        return [(item, type_label) for item in items]
+                    except ddb_table.meta.client.exceptions.ResourceNotFoundException:
+                        logger.warning(f"[ADMIN] LocationDateIndex not found on {type_label}, falling back to scan")
+                    except Exception as gsi_err:
+                        err_code = getattr(gsi_err, "response", {}).get("Error", {}).get("Code", "")
+                        if err_code == "ValidationException" and "LocationDateIndex" in str(gsi_err):
+                            logger.warning(f"[ADMIN] LocationDateIndex not ready on {type_label}, falling back to scan")
+                        else:
+                            raise
+
+                # FALLBACK: scan with FilterExpression
+                filter_parts = []
+                attr_names = {}
+                attr_values = {}
+
+                if filter_start and filter_end:
+                    filter_parts.append("#doa BETWEEN :ds AND :de")
+                    attr_names["#doa"] = "date_of_audit"
+                    attr_values[":ds"] = filter_start
+                    attr_values[":de"] = filter_end
+                elif filter_start:
+                    filter_parts.append("#doa >= :ds")
+                    attr_names["#doa"] = "date_of_audit"
+                    attr_values[":ds"] = filter_start
+                elif filter_end:
+                    filter_parts.append("#doa <= :de")
+                    attr_names["#doa"] = "date_of_audit"
+                    attr_values[":de"] = filter_end
+
+                if filter_location:
+                    filter_parts.append("(#loc = :loc OR #fa = :loc)")
+                    attr_names["#loc"] = "location"
+                    attr_names["#fa"] = "facility_area"
+                    attr_values[":loc"] = filter_location
+
+                scan_kwargs = {}
+                if filter_parts:
+                    scan_kwargs["FilterExpression"] = " AND ".join(filter_parts)
+                    scan_kwargs["ExpressionAttributeNames"] = attr_names
+                    scan_kwargs["ExpressionAttributeValues"] = attr_values
+
+                items = []
+                resp = ddb_table.scan(**scan_kwargs)
+                items.extend(resp.get("Items", []))
+                while "LastEvaluatedKey" in resp:
+                    scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+                    resp = ddb_table.scan(**scan_kwargs)
+                    items.extend(resp.get("Items", []))
+
+                items = convert_decimals(items)
+                logger.info(f"[ADMIN] Scanned {type_label}: {len(items)} items (filtered server-side)")
                 return [(item, type_label) for item in items]
             except Exception as e:
                 logger.error(f"Error scanning table for {type_label}: {str(e)}")
@@ -905,15 +1065,14 @@ def admin_list_inspections(event):
 
         with ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
-                executor.submit(_scan_table, label, table): label
+                executor.submit(_query_or_scan_table, label, table): label
                 for label, table in inspection_tables.items()
             }
             for future in as_completed(futures):
                 all_inspections.extend(future.result())
 
-        logger.info(f"[ADMIN] Total inspections scanned: {len(all_inspections)}")
+        logger.info(f"[ADMIN] Total inspections after server-side filter: {len(all_inspections)}")
 
-        # Build response list with filters and computed fields
         result_list = []
         for raw, type_label in all_inspections:
             try:
@@ -923,17 +1082,6 @@ def admin_list_inspections(event):
                 location = str(raw.get("location") or "")
                 facility_area = str(raw.get("facility_area") or "")
 
-                # Apply filters — match against location first, then facility_area
-                if filter_location:
-                    match_target = location if location else facility_area
-                    if filter_location.lower() != match_target.lower():
-                        continue
-                if filter_start and date_of_audit < filter_start:
-                    continue
-                if filter_end and date_of_audit > filter_end:
-                    continue
-
-                # Honor stored status from pause/resume endpoints
                 stored_status = str(raw.get("status") or "").strip()
                 if stored_status in ("paused", "in_progress"):
                     status = stored_status
@@ -942,7 +1090,6 @@ def admin_list_inspections(event):
 
                 evidence = count_evidence(categories)
 
-                # Compute progress for incomplete inspections
                 progress = None
                 if status in ("in_progress", "paused", "pending"):
                     progress = compute_progress(categories)
@@ -967,7 +1114,6 @@ def admin_list_inspections(event):
                 logger.error(f"Error processing inspection record: {str(e)}")
                 continue
 
-        # Sort newest first
         result_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
         stats = {
@@ -1106,6 +1252,7 @@ def update_company(event):
     )
 
     updated = dashboard_table.get_item(Key={"PK": f"COMPANY#{company_key}", "SK": "METADATA"}).get("Item", {})
+    _invalidate_dashboard_cache()
     return build_response(200, {
         "key": company_key,
         "name": updated.get("name", ""),
@@ -1160,6 +1307,7 @@ def update_location(event):
     updated = dashboard_table.get_item(
         Key={"PK": f"COMPANY#{company_key}", "SK": f"LOCATION#{location_key}"}
     ).get("Item", {})
+    _invalidate_dashboard_cache()
 
     return build_response(200, {
         "key": location_key,
@@ -1176,42 +1324,51 @@ def update_location(event):
 # API 10: DELETE /api/companies/{company_key}
 # ═══════════════════════════════════════════════
 def delete_company(event):
-    """Deletes a company and all its locations and stations."""
+    """Deletes a company and all its locations and stations.
+    OPTIMIZED: Uses targeted DynamoDB queries by PK instead of full table scan."""
     path_params = event.get("pathParameters") or {}
     company_key = str(path_params.get("company_key", "")).strip()
 
     if not company_key:
         return build_response(400, {"error": "company_key is required"})
 
-    # Check company exists
     existing = dashboard_table.get_item(Key={"PK": f"COMPANY#{company_key}", "SK": "METADATA"}).get("Item")
     if not existing:
         return build_response(404, {"error": f"Company '{company_key}' not found"})
 
-    # Find all locations under this company
-    all_items = scan_full_table(dashboard_table)
+    # Query locations under this company (PK=COMPANY#ck, SK begins_with LOCATION#)
+    loc_resp = dashboard_table.query(
+        KeyConditionExpression=Key("PK").eq(f"COMPANY#{company_key}") & Key("SK").begins_with("LOCATION#"),
+    )
+    location_items = loc_resp.get("Items", [])
+
     deleted_locations = []
     deleted_stations = []
 
-    # Collect location keys
-    location_keys = []
-    for item in all_items:
-        if item.get("PK") == f"COMPANY#{company_key}" and item.get("SK", "").startswith("LOCATION#"):
-            loc_key = item["SK"].replace("LOCATION#", "")
-            location_keys.append(loc_key)
-            dashboard_table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
-            deleted_locations.append(loc_key)
+    for loc_item in location_items:
+        lk = loc_item["SK"][9:]  # strip "LOCATION#"
+        deleted_locations.append(lk)
+        dashboard_table.delete_item(Key={"PK": loc_item["PK"], "SK": loc_item["SK"]})
 
-    # Delete all stations under those locations
-    for item in all_items:
-        if item.get("PK", "").startswith("LOCATION#") and item.get("SK", "").startswith("STATION#"):
-            loc_key = item["PK"].replace("LOCATION#", "")
-            if loc_key in location_keys:
-                dashboard_table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
-                deleted_stations.append(item.get("station_id", ""))
+        # Query stations under this location (PK=LOCATION#lk, SK begins_with STATION#)
+        st_resp = dashboard_table.query(
+            KeyConditionExpression=Key("PK").eq(f"LOCATION#{lk}") & Key("SK").begins_with("STATION#"),
+        )
+        for st_item in st_resp.get("Items", []):
+            dashboard_table.delete_item(Key={"PK": st_item["PK"], "SK": st_item["SK"]})
+            deleted_stations.append(st_item.get("station_id", ""))
 
-    # Delete the company itself
     dashboard_table.delete_item(Key={"PK": f"COMPANY#{company_key}", "SK": "METADATA"})
+
+    # Remove reseller→company association if any
+    assoc_resp = dashboard_table.scan(
+        FilterExpression=Attr("SK").eq(f"COMPANY#{company_key}") & Attr("PK").begins_with("RESELLER#"),
+        ProjectionExpression="PK, SK",
+    )
+    for assoc in assoc_resp.get("Items", []):
+        dashboard_table.delete_item(Key={"PK": assoc["PK"], "SK": assoc["SK"]})
+
+    _invalidate_dashboard_cache()
 
     return build_response(200, {
         "message": "Company deleted successfully",
@@ -1225,7 +1382,8 @@ def delete_company(event):
 # API 9: DELETE /api/companies/{ck}/locations/{lk}
 # ═══════════════════════════════════════════════
 def delete_location(event):
-    """Deletes a location and all its stations."""
+    """Deletes a location and all its stations.
+    OPTIMIZED: Uses targeted DynamoDB query by PK instead of full table scan."""
     path_params = event.get("pathParameters") or {}
     company_key = str(path_params.get("company_key", "")).strip()
     location_key = str(path_params.get("location_key", "")).strip()
@@ -1233,23 +1391,23 @@ def delete_location(event):
     if not company_key or not location_key:
         return build_response(400, {"error": "company_key and location_key are required"})
 
-    # Check location exists
     existing = dashboard_table.get_item(
         Key={"PK": f"COMPANY#{company_key}", "SK": f"LOCATION#{location_key}"}
     ).get("Item")
     if not existing:
         return build_response(404, {"error": f"Location '{location_key}' not found"})
 
-    # Delete all stations under this location
-    all_items = scan_full_table(dashboard_table)
+    # Query all stations under this location (PK=LOCATION#lk)
+    st_resp = dashboard_table.query(
+        KeyConditionExpression=Key("PK").eq(f"LOCATION#{location_key}") & Key("SK").begins_with("STATION#"),
+    )
     deleted_stations = []
-    for item in all_items:
-        if item.get("PK") == f"LOCATION#{location_key}" and item.get("SK", "").startswith("STATION#"):
-            dashboard_table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
-            deleted_stations.append(item.get("station_id", ""))
+    for st_item in st_resp.get("Items", []):
+        dashboard_table.delete_item(Key={"PK": st_item["PK"], "SK": st_item["SK"]})
+        deleted_stations.append(st_item.get("station_id", ""))
 
-    # Delete the location
     dashboard_table.delete_item(Key={"PK": f"COMPANY#{company_key}", "SK": f"LOCATION#{location_key}"})
+    _invalidate_dashboard_cache()
 
     return build_response(200, {
         "message": "Location deleted successfully",
@@ -1262,25 +1420,21 @@ def delete_location(event):
 # API 10: DELETE /api/stations/{station_id}
 # ═══════════════════════════════════════════════
 def delete_station(event):
-    """Deletes a single station."""
+    """Deletes a single station.
+    OPTIMIZED: Uses StationIdIndex GSI → parsed get_item → scan fallback."""
     path_params = event.get("pathParameters") or {}
     station_id = str(path_params.get("station_id", "")).strip()
 
     if not station_id:
         return build_response(400, {"error": "station_id is required"})
 
-    # Find the station
-    all_items = scan_full_table(dashboard_table)
-    station_item = None
-    for item in all_items:
-        if item.get("SK") == f"STATION#{station_id}" and item.get("PK", "").startswith("LOCATION#"):
-            station_item = item
-            break
+    station_item = _find_station_by_id(station_id)
 
     if not station_item:
         return build_response(404, {"error": f"Station '{station_id}' not found"})
 
     dashboard_table.delete_item(Key={"PK": station_item["PK"], "SK": station_item["SK"]})
+    _invalidate_dashboard_cache()
 
     return build_response(200, {
         "message": "Station deleted successfully",
@@ -1316,7 +1470,6 @@ def mobile_inspection_status(event):
         category       (optional) — Filter to a single category typeKey
         auditor_name   (optional) — Filter progress to a specific inspector
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     try:
         params = event.get("queryStringParameters", {}) or {}
@@ -1335,16 +1488,29 @@ def mobile_inspection_status(event):
             })
 
         # ── Step 1: Get all stations under this location from dashboard table ──
-        all_dashboard_items = scan_full_table(dashboard_table)
-        all_dashboard_items = convert_decimals(all_dashboard_items)
+        # OPTIMIZED: Use targeted DynamoDB query instead of full table scan.
+        # Stations live under PK=LOCATION#{lk}, so we query directly.
 
-        # Find the location name (from COMPANY#/LOCATION# record)
+        # 1a. Find the location name — it lives in PK=COMPANY#{ck} / SK=LOCATION#{lk}
+        #     We don't know the company_key, so we use a filtered scan with
+        #     ProjectionExpression to minimize data transfer.
         location_name = ""
         location_found = False
-        for item in all_dashboard_items:
-            pk = item.get("PK", "")
-            sk = item.get("SK", "")
-            if sk == f"LOCATION#{location_key}" and pk.startswith("COMPANY#"):
+        loc_scan_kwargs = {
+            "FilterExpression": Attr("SK").eq(f"LOCATION#{location_key}"),
+            "ProjectionExpression": "PK, SK, #n",
+            "ExpressionAttributeNames": {"#n": "name"},
+        }
+        loc_resp = dashboard_table.scan(**loc_scan_kwargs)
+        loc_items = loc_resp.get("Items", [])
+        # Handle pagination (unlikely for this small result set, but safe)
+        while "LastEvaluatedKey" in loc_resp:
+            loc_scan_kwargs["ExclusiveStartKey"] = loc_resp["LastEvaluatedKey"]
+            loc_resp = dashboard_table.scan(**loc_scan_kwargs)
+            loc_items.extend(loc_resp.get("Items", []))
+
+        for item in loc_items:
+            if item.get("PK", "").startswith("COMPANY#"):
                 location_name = item.get("name", location_key)
                 location_found = True
                 break
@@ -1352,39 +1518,92 @@ def mobile_inspection_status(event):
         if not location_found:
             return build_response(404, {"error": f"Location '{location_key}' not found"})
 
+        # 1b. Query stations directly by PK — fast DynamoDB query (not a scan)
+        station_resp = dashboard_table.query(
+            KeyConditionExpression=Key("PK").eq(f"LOCATION#{location_key}"),
+        )
+        station_items = convert_decimals(station_resp.get("Items", []))
+
         # Collect all stations under this location
         location_stations = []
-        for item in all_dashboard_items:
-            pk = item.get("PK", "")
+        for item in station_items:
             sk = item.get("SK", "")
-            if pk == f"LOCATION#{location_key}" and sk.startswith("STATION#"):
-                type_key = item.get("typeKey", "")
-                # Apply category filter if specified
-                if filter_category and type_key != filter_category:
-                    continue
-                location_stations.append({
-                    "station_id": item.get("station_id", sk.replace("STATION#", "")),
-                    "station_name": item.get("name", ""),
-                    "type_key": type_key,
-                    "next_due": item.get("nextDue", ""),
-                    "equipment_status": item.get("status", "ok"),
-                    "lastInspected": item.get("lastInspected", ""),
-                })
+            if not sk.startswith("STATION#"):
+                continue
+            type_key = item.get("typeKey", "")
+            # Apply category filter if specified
+            if filter_category and type_key != filter_category:
+                continue
+            location_stations.append({
+                "station_id": item.get("station_id", sk.replace("STATION#", "")),
+                "station_name": item.get("name", ""),
+                "type_key": type_key,
+                "next_due": item.get("nextDue", ""),
+                "equipment_status": item.get("status", "ok"),
+                "lastInspected": item.get("lastInspected", ""),
+            })
 
         logger.info(f"[MOBILE] Location '{location_key}': {len(location_stations)} stations found")
 
         # ── Step 2: Scan inspections from all 6 tables in PARALLEL ──
-        # Determine today's date for filtering (daily scope per frontend requirement)
+        # Determine current month range for filtering (monthly scope per spec)
         today = datetime.now(timezone.utc)
         today_str = today.strftime("%Y-%m-%d")
+        month_start_str = today.strftime("%Y-%m-01")
+        # Calculate last day of current month
+        if today.month == 12:
+            _next_month = today.replace(year=today.year + 1, month=1, day=1)
+        else:
+            _next_month = today.replace(month=today.month + 1, day=1)
+        month_end_str = (_next_month - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        logger.info(f"[MOBILE] Filtering inspections for month: {month_start_str} to {month_end_str}")
 
         all_inspections = []
 
-        def _scan_inspection_table(type_label, ddb_table):
-            """Scan a single inspection table and return matching records."""
+        def _query_or_scan_inspection_table(type_label, ddb_table):
+            """Use LocationDateIndex GSI query when available, otherwise scan with filter.
+            GSI query reads only matching records — O(K) instead of O(N)."""
             try:
-                items = convert_decimals(scan_full_table(ddb_table))
-                return [(item, type_label) for item in items]
+                items = []
+
+                # FAST PATH: GSI query by facility_area + date range
+                if location_name:
+                    try:
+                        kce = Key("facility_area").eq(location_name) & \
+                              Key("date_of_audit").between(month_start_str, month_end_str)
+                        query_kwargs = {
+                            "IndexName": "LocationDateIndex",
+                            "KeyConditionExpression": kce,
+                        }
+                        resp = ddb_table.query(**query_kwargs)
+                        items.extend(resp.get("Items", []))
+                        while "LastEvaluatedKey" in resp:
+                            query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+                            resp = ddb_table.query(**query_kwargs)
+                            items.extend(resp.get("Items", []))
+
+                        return [(convert_decimals(item), type_label) for item in items]
+                    except Exception as gsi_err:
+                        err_code = getattr(gsi_err, "response", {}).get("Error", {}).get("Code", "")
+                        if err_code == "ValidationException" and "LocationDateIndex" in str(gsi_err):
+                            logger.warning(f"[MOBILE] LocationDateIndex not ready on {type_label}, falling back to scan")
+                        else:
+                            raise
+
+                # FALLBACK: scan with FilterExpression
+                scan_kwargs = {
+                    "FilterExpression": Attr("date_of_audit").between(
+                        month_start_str, month_end_str
+                    ),
+                }
+                resp = ddb_table.scan(**scan_kwargs)
+                items.extend(resp.get("Items", []))
+                while "LastEvaluatedKey" in resp:
+                    scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+                    resp = ddb_table.scan(**scan_kwargs)
+                    items.extend(resp.get("Items", []))
+                return [(convert_decimals(item), type_label) for item in items]
             except Exception as e:
                 logger.error(f"[MOBILE] Error scanning {type_label}: {str(e)}")
                 return []
@@ -1400,23 +1619,25 @@ def mobile_inspection_status(event):
 
         with ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
-                executor.submit(_scan_inspection_table, label, tbl): label
+                executor.submit(_query_or_scan_inspection_table, label, tbl): label
                 for label, tbl in tables_to_scan.items()
             }
             for future in as_completed(futures):
                 all_inspections.extend(future.result())
 
-        logger.info(f"[MOBILE] Total inspections scanned: {len(all_inspections)}")
+        logger.info(f"[MOBILE] Total inspections fetched (this month): {len(all_inspections)}")
 
-        # ── Step 3: Build station_id → inspection mapping for today ──
+        # ── Step 3: Build station_id → inspection mapping for this month ──
         # An inspection matches a station if:
         #   (a) station_id field matches (preferred, new flow), OR
         #   (b) station name matches (fallback, legacy flow)
-        # AND the inspection date_of_audit is today
+        # AND the inspection date_of_audit is within the current month
+        #     (already filtered in Step 2 by DynamoDB FilterExpression)
         # AND (if auditor_name filter) the auditor matches
 
         station_id_set = {s["station_id"] for s in location_stations}
-        station_name_set = {s["station_name"].lower() for s in location_stations}
+        # OPTIMIZED: Pre-build name→id dict for O(1) lookup instead of O(N) inner loop
+        station_name_to_id = {s["station_name"].lower(): s["station_id"] for s in location_stations}
 
         # Map: station_id → best matching inspection record
         station_inspection_map = {}  # station_id → {inspection_id, status, created_at, completed_at}
@@ -1424,8 +1645,8 @@ def mobile_inspection_status(event):
         for raw, type_label in all_inspections:
             try:
                 date_of_audit = str(raw.get("date_of_audit") or "")
-                # Filter to today's date
-                if date_of_audit != today_str:
+                # Safety check: ensure within current month (already filtered server-side)
+                if date_of_audit < month_start_str or date_of_audit > month_end_str:
                     continue
 
                 # Filter by auditor if specified
@@ -1452,11 +1673,8 @@ def mobile_inspection_status(event):
                 if insp_station_id and insp_station_id in station_id_set:
                     matched_station_id = insp_station_id
                 elif insp_station_name:
-                    # Fallback: match by station name against our station list
-                    for s in location_stations:
-                        if s["station_name"].lower() == insp_station_name.lower():
-                            matched_station_id = s["station_id"]
-                            break
+                    # Fallback: O(1) dict lookup by station name (was O(N) loop)
+                    matched_station_id = station_name_to_id.get(insp_station_name.lower())
 
                 if not matched_station_id:
                     continue
@@ -1510,14 +1728,15 @@ def mobile_inspection_status(event):
             sid = station["station_id"]
             insp = station_inspection_map.get(sid)
 
-            # Derive equipment_status: if inspection is completed today,
+            # Derive equipment_status: if inspection is completed this month,
             # override the stored dashboard status to "ok" + update lastInspected
             stored_eq_status = station.get("equipment_status", "ok")
             stored_last_inspected = station.get("lastInspected", "")
+            next_due = station.get("next_due", "")
 
             if insp and insp["status"] == "completed":
                 derived_eq_status = "ok"
-                derived_last_inspected = today_str
+                derived_last_inspected = insp.get("completed_at", today_str)[:10] if insp.get("completed_at") else today_str
             else:
                 derived_eq_status = stored_eq_status
                 derived_last_inspected = stored_last_inspected
@@ -1529,19 +1748,27 @@ def mobile_inspection_status(event):
                     "status": insp["status"],
                     "equipment_status": derived_eq_status,
                     "lastInspected": derived_last_inspected,
-                    "nextDue": station.get("next_due", ""),
+                    "nextDue": next_due,
                     "inspection_id": insp["inspection_id"],
                     "started_at": insp["started_at"],
                     "completed_at": insp["completed_at"],
                 }
             else:
+                # No inspection found this month — determine if pending or overdue
+                # A station is "overdue" if its nextDue date has passed and no
+                # inspection exists for the current month.
+                if next_due and next_due < today_str:
+                    no_insp_status = "overdue"
+                else:
+                    no_insp_status = "pending"
+
                 station_entry = {
                     "station_id": sid,
                     "station_name": station["station_name"],
-                    "status": "pending",
+                    "status": no_insp_status,
                     "equipment_status": stored_eq_status,
                     "lastInspected": stored_last_inspected,
-                    "nextDue": station.get("next_due", ""),
+                    "nextDue": next_due,
                     "inspection_id": None,
                     "started_at": None,
                     "completed_at": None,
@@ -1555,6 +1782,7 @@ def mobile_inspection_status(event):
         completed_all = 0
         started_all = 0
         pending_all = 0
+        overdue_all = 0
 
         for st_type in STATION_TYPES:
             tk = st_type["key"]
@@ -1566,12 +1794,14 @@ def mobile_inspection_status(event):
             cat_completed = sum(1 for s in stations_list if s["status"] == "completed")
             cat_started = sum(1 for s in stations_list if s["status"] == "started")
             cat_pending = sum(1 for s in stations_list if s["status"] == "pending")
+            cat_overdue = sum(1 for s in stations_list if s["status"] == "overdue")
             cat_total = len(stations_list)
 
             total_all += cat_total
             completed_all += cat_completed
             started_all += cat_started
             pending_all += cat_pending
+            overdue_all += cat_overdue
 
             categories_response.append({
                 "category_key": tk,
@@ -1581,6 +1811,7 @@ def mobile_inspection_status(event):
                     "completed": cat_completed,
                     "started": cat_started,
                     "pending": cat_pending,
+                    "overdue": cat_overdue,
                 },
                 "stations": stations_list,
             })
@@ -1597,6 +1828,7 @@ def mobile_inspection_status(event):
                 "completed": completed_all,
                 "started": started_all,
                 "pending": pending_all,
+                "overdue": overdue_all,
                 "percent_complete": percent_complete,
             },
             "categories": categories_response,
