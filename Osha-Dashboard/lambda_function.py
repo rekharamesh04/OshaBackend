@@ -76,6 +76,35 @@ inspection_tables = {
     "Quarterly HRA":      dynamodb.Table(os.getenv("HRA_TABLE", "osha-hra-inspections")),
 }
 
+# Centralized session table (shared across all inspection types)
+session_table = dynamodb.Table(os.getenv("SESSION_TABLE_NAME", "osha-inspection-sessions"))
+
+# Maps category key (dashboard/mobile) → inspection_type value stored in session table
+CATEGORY_TO_INSPECTION_TYPE = {
+    "eyewash": "eyewash",
+    "fire": "fire-extinguisher",
+    "exitdoor": "exit-door",
+    "racking": "racking",
+    "hra": "hra",
+    "recordkeeping": "recordkeeping",
+}
+
+# Maps inspection_type (session table) → inspection_tables label
+INSPECTION_TYPE_TO_LABEL = {
+    "eyewash": "Eyewash",
+    "fire-extinguisher": "Fire Extinguisher",
+    "exit-door": "Exit Door",
+    "racking": "Monthly Racking",
+    "hra": "Quarterly HRA",
+    "recordkeeping": "Recordkeeping",
+}
+
+# Auto-calculated summary items to skip during progress/next-item computation
+SUMMARY_ITEM_IDS = {
+    "fire-extinguisher": {11, 12},
+    "exit-door": {18, 19},
+}
+
 # ─────────────────────────────────────────────
 # Fixed Station Type Categories
 # ─────────────────────────────────────────────
@@ -245,6 +274,88 @@ def _extract_location_key_from_station_id(station_id):
         if prefix.endswith(suffix):
             return prefix[:-len(suffix)]
     return None
+
+
+# ═══════════════════════════════════════════════
+# Centralized Session Helpers
+# ═══════════════════════════════════════════════
+
+def _get_inspection_table(inspection_type):
+    """Resolve an inspection_type string to its DynamoDB table object."""
+    label = INSPECTION_TYPE_TO_LABEL.get(inspection_type)
+    if label:
+        return inspection_tables.get(label)
+    return None
+
+
+def _get_inspection_table_by_category(category_key):
+    """Resolve a dashboard category key to its DynamoDB table object."""
+    inspection_type = CATEGORY_TO_INSPECTION_TYPE.get(category_key)
+    if inspection_type:
+        return _get_inspection_table(inspection_type)
+    return None
+
+
+def _session_progress(inspection, inspection_type=""):
+    """Compute progress for any inspection type. Returns {total, answered, percentage}."""
+    skip_ids = SUMMARY_ITEM_IDS.get(inspection_type, set())
+    total = 0
+    answered = 0
+    for cat in inspection.get("categories", []):
+        for item in cat.get("items", []):
+            iid = item.get("id")
+            if isinstance(iid, int) and iid in skip_ids:
+                continue
+            total += 1
+            if str(item.get("answer") or "").strip():
+                answered += 1
+        for sub in cat.get("sub_sections", []):
+            for item in sub.get("items", []):
+                total += 1
+                if str(item.get("answer") or "").strip():
+                    answered += 1
+    pct = round((answered / total * 100), 1) if total > 0 else 0
+    return {"total": total, "answered": answered, "percentage": pct}
+
+
+def _session_next_unanswered(inspection, inspection_type=""):
+    """Find the next unanswered item ID. Returns None if all answered."""
+    skip_ids = SUMMARY_ITEM_IDS.get(inspection_type, set())
+    for cat in inspection.get("categories", []):
+        for item in cat.get("items", []):
+            iid = item.get("id")
+            if isinstance(iid, int) and iid in skip_ids:
+                continue
+            if not str(item.get("answer") or "").strip():
+                return iid
+        for sub in cat.get("sub_sections", []):
+            for item in sub.get("items", []):
+                if not str(item.get("answer") or "").strip():
+                    return item.get("id")
+    return None
+
+
+def _session_compute_status(inspection, inspection_type=""):
+    """Compute inspection status from answers. Returns in_progress/completed/pending."""
+    progress = _session_progress(inspection, inspection_type)
+    if progress["total"] == 0:
+        return "pending"
+    if progress["answered"] == progress["total"]:
+        return "completed"
+    if progress["answered"] > 0:
+        return "in_progress"
+    return "pending"
+
+
+def _sanitize_dynamodb(obj):
+    """Recursively sanitize a Python object for DynamoDB put_item."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_dynamodb(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_sanitize_dynamodb(i) for i in obj]
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    return obj
 
 
 # ═══════════════════════════════════════════════
@@ -1007,7 +1118,13 @@ def admin_list_inspections(event):
 
                         items = convert_decimals(items)
                         logger.info(f"[ADMIN] GSI query {type_label}: {len(items)} items")
-                        return [(item, type_label) for item in items]
+                        if items:
+                            return [(item, type_label) for item in items]
+                        else:
+                            logger.info(
+                                f"[ADMIN] GSI returned 0 for facility_area='{filter_location}' "
+                                f"on {type_label}, falling back to scan"
+                            )
                     except ddb_table.meta.client.exceptions.ResourceNotFoundException:
                         logger.warning(f"[ADMIN] LocationDateIndex not found on {type_label}, falling back to scan")
                     except Exception as gsi_err:
@@ -1583,7 +1700,13 @@ def mobile_inspection_status(event):
                             resp = ddb_table.query(**query_kwargs)
                             items.extend(resp.get("Items", []))
 
-                        return [(convert_decimals(item), type_label) for item in items]
+                        if items:
+                            return [(convert_decimals(item), type_label) for item in items]
+                        else:
+                            logger.info(
+                                f"[MOBILE] GSI returned 0 for facility_area='{location_name}' "
+                                f"on {type_label}, falling back to scan"
+                            )
                     except Exception as gsi_err:
                         err_code = getattr(gsi_err, "response", {}).get("Error", {}).get("Code", "")
                         if err_code == "ValidationException" and "LocationDateIndex" in str(gsi_err):
@@ -1595,6 +1718,9 @@ def mobile_inspection_status(event):
                 scan_kwargs = {
                     "FilterExpression": Attr("date_of_audit").between(
                         month_start_str, month_end_str
+                    ) & (
+                        Attr("facility_area").eq(location_name)
+                        | Attr("location").eq(location_name)
                     ),
                 }
                 resp = ddb_table.scan(**scan_kwargs)
@@ -1703,12 +1829,14 @@ def mobile_inspection_status(event):
                     completed_at = created_at
 
                 inspection_id = str(raw.get("inspection_id") or "")
+                session_id_val = str(raw.get("session_id") or "")
 
                 # Keep the most recent inspection if multiple exist
                 existing = station_inspection_map.get(matched_station_id)
                 if not existing or created_at > existing.get("started_at", ""):
                     station_inspection_map[matched_station_id] = {
                         "inspection_id": inspection_id,
+                        "session_id": session_id_val,
                         "status": status,
                         "started_at": created_at,
                         "completed_at": completed_at,
@@ -1750,6 +1878,7 @@ def mobile_inspection_status(event):
                     "lastInspected": derived_last_inspected,
                     "nextDue": next_due,
                     "inspection_id": insp["inspection_id"],
+                    "session_id": insp.get("session_id", ""),
                     "started_at": insp["started_at"],
                     "completed_at": insp["completed_at"],
                 }
@@ -1770,6 +1899,7 @@ def mobile_inspection_status(event):
                     "lastInspected": stored_last_inspected,
                     "nextDue": next_due,
                     "inspection_id": None,
+                    "session_id": None,
                     "started_at": None,
                     "completed_at": None,
                 }
@@ -1839,6 +1969,520 @@ def mobile_inspection_status(event):
     except Exception as e:
         logger.exception(f"[MOBILE] mobile_inspection_status failed: {str(e)}")
         return build_response(500, {"error": f"Internal error: {str(e)}"})
+
+
+# ═══════════════════════════════════════════════
+# CENTRALIZED SESSION API
+# Replaces per-Lambda pause/resume with unified auto-save + draft discovery
+# ═══════════════════════════════════════════════
+
+def find_draft(event):
+    """
+    GET /api/sessions/find-draft?station_id=X&auditor_name=Y&category=Z
+
+    Finds an active (non-completed) draft for a specific station + auditor + category.
+    Returns the draft metadata with progress and next_item_id so the frontend
+    can resume exactly where the auditor left off.
+
+    This replaces the need to manually track session_id on the frontend.
+    """
+    params = event.get("queryStringParameters") or {}
+    station_id = str(params.get("station_id", "") or "").strip()
+    auditor_name = str(params.get("auditor_name", "") or "").strip()
+    category = str(params.get("category", "") or "").strip()
+
+    if not station_id or not auditor_name or not category:
+        return build_response(400, {"error": "station_id, auditor_name, and category are required"})
+
+    inspection_type = CATEGORY_TO_INSPECTION_TYPE.get(category)
+    if not inspection_type:
+        return build_response(400, {
+            "error": f"Invalid category '{category}'. Must be one of: {', '.join(CATEGORY_TO_INSPECTION_TYPE.keys())}"
+        })
+
+    insp_table = _get_inspection_table_by_category(category)
+    if not insp_table:
+        return build_response(400, {"error": f"No inspection table for category '{category}'"})
+
+    # Look up sessions for this station_id
+    # Try GSI first (StationDraftIndex: PK=station_id, SK=date_of_audit)
+    sessions = []
+    try:
+        resp = session_table.query(
+            IndexName="StationDraftIndex",
+            KeyConditionExpression=Key("station_id").eq(station_id),
+        )
+        sessions = resp.get("Items", [])
+        while "LastEvaluatedKey" in resp:
+            resp = session_table.query(
+                IndexName="StationDraftIndex",
+                KeyConditionExpression=Key("station_id").eq(station_id),
+                ExclusiveStartKey=resp["LastEvaluatedKey"],
+            )
+            sessions.extend(resp.get("Items", []))
+    except Exception as gsi_err:
+        err_code = getattr(gsi_err, "response", {}).get("Error", {}).get("Code", "")
+        if err_code == "ValidationException" and "StationDraftIndex" in str(gsi_err):
+            logger.warning("[SESSION] StationDraftIndex not found, falling back to scan")
+        else:
+            logger.warning(f"[SESSION] GSI query failed: {gsi_err}")
+
+        # Fallback: scan with filter
+        scan_kwargs = {
+            "FilterExpression": Attr("station_id").eq(station_id),
+        }
+        resp = session_table.scan(**scan_kwargs)
+        sessions = resp.get("Items", [])
+        while "LastEvaluatedKey" in resp:
+            scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+            resp = session_table.scan(**scan_kwargs)
+            sessions.extend(resp.get("Items", []))
+
+    # Compute current month boundaries for filtering
+    today = datetime.now(timezone.utc)
+    month_start_str = today.strftime("%Y-%m-01")
+    if today.month == 12:
+        _next_month = today.replace(year=today.year + 1, month=1, day=1)
+    else:
+        _next_month = today.replace(month=today.month + 1, day=1)
+    month_end_str = (_next_month - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Filter: matching auditor + matching category + not completed
+    active_drafts = []
+    for s in sessions:
+        s_auditor = str(s.get("auditor_name", "")).strip()
+        if s_auditor.lower() != auditor_name.lower():
+            continue
+        s_type = str(s.get("inspection_type", "")).strip()
+        if s_type and s_type != inspection_type:
+            continue
+        s_status = str(s.get("status", "")).strip().lower()
+        if s_status in ("completed", "submitted", "passed", "failed"):
+            continue
+            
+        # Only return drafts from the current month
+        s_date = str(s.get("date_of_audit", "") or s.get("created_at", "")).strip()[:10]
+        if s_date and (s_date < month_start_str or s_date > month_end_str):
+            continue
+
+        active_drafts.append(s)
+
+    if not active_drafts:
+        return build_response(200, {"draft": None, "message": "No active draft found"})
+
+    # Pick the most recent draft
+    active_drafts.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    session = convert_decimals(active_drafts[0])
+
+    # Load the linked inspection
+    inspection_id = session.get("inspection_id", "")
+    inspection = None
+    if inspection_id:
+        insp_resp = insp_table.get_item(Key={"inspection_id": inspection_id})
+        inspection = insp_resp.get("Item")
+
+    if not inspection:
+        # Session exists but inspection not linked — still return session info
+        return build_response(200, {
+            "draft": {
+                "session_id": session.get("session_id", ""),
+                "inspection_id": None,
+                "category": category,
+                "status": "pending",
+                "progress": {"total": 0, "answered": 0, "percentage": 0},
+                "next_item_id": None,
+                "auditor_name": session.get("auditor_name", ""),
+                "facility_area": session.get("facility_area", ""),
+                "date_of_audit": session.get("date_of_audit", ""),
+                "last_updated": session.get("updated_at", session.get("created_at", "")),
+            }
+        })
+
+    inspection = convert_decimals(inspection)
+
+    # ─── SELF-HEAL: backfill inspection_type if it was never set ───
+    if not str(session.get("inspection_type", "")).strip():
+        try:
+            session_table.update_item(
+                Key={"session_id": session.get("session_id", "")},
+                UpdateExpression="SET inspection_type = :it",
+                ExpressionAttributeValues={":it": inspection_type},
+            )
+            logger.info(
+                f"[SESSION] Backfilled inspection_type='{inspection_type}' "
+                f"for session {session.get('session_id')}"
+            )
+        except Exception as backfill_err:
+            logger.warning(f"[SESSION] Failed to backfill inspection_type: {backfill_err}")
+
+    progress = _session_progress(inspection, inspection_type)
+    next_item = _session_next_unanswered(inspection, inspection_type)
+
+    return build_response(200, {
+        "draft": {
+            "session_id": session.get("session_id", ""),
+            "inspection_id": inspection_id,
+            "category": category,
+            "status": inspection.get("status", "in_progress"),
+            "progress": progress,
+            "next_item_id": next_item,
+            "auditor_name": inspection.get("auditor_name", ""),
+            "facility_area": inspection.get("facility_area", ""),
+            "station": inspection.get("station", ""),
+            "station_id": inspection.get("station_id", station_id),
+            "date_of_audit": inspection.get("date_of_audit", ""),
+            "last_updated": inspection.get("updated_at", ""),
+        }
+    })
+
+
+def autosave_inspection(event):
+    """
+    POST /api/sessions/autosave
+
+    Centralized auto-save endpoint. The frontend calls this after EVERY item
+    change instead of manually pausing. Saves the answer to the correct
+    inspection table and updates session progress in real-time.
+
+    Body: {
+        "session_id": "uuid",          (required)
+        "item_id": 3,                  (required — checklist item ID)
+        "category_id": 1,             (optional — category ID containing the item)
+        "answer": "Yes",              (optional)
+        "finding": "...",             (optional)
+        "action_item": "...",         (optional)
+        "responsible": "...",         (optional)
+        "due_date": "YYYY-MM-DD",    (optional)
+        "evidence": [],              (optional)
+        "notes": "..."               (optional — top-level inspection notes)
+    }
+    """
+    body = parse_body(event)
+    session_id = str(body.get("session_id", "")).strip()
+    item_id = body.get("item_id")
+
+    if not session_id:
+        return build_response(400, {"error": "session_id is required"})
+
+    # Load session
+    session_resp = session_table.get_item(Key={"session_id": session_id})
+    session = session_resp.get("Item")
+    if not session:
+        return build_response(404, {"error": f"Session '{session_id}' not found"})
+
+    inspection_id = str(session.get("inspection_id", "") or "").strip()
+    inspection_type = str(session.get("inspection_type", "") or "").strip()
+
+    if not inspection_id:
+        return build_response(400, {"error": "No inspection linked to this session. Start an inspection first."})
+
+    insp_table = _get_inspection_table(inspection_type)
+    if not insp_table:
+        return build_response(400, {"error": f"Unknown inspection type '{inspection_type}'"})
+
+    # Load inspection
+    insp_resp = insp_table.get_item(Key={"inspection_id": inspection_id})
+    inspection = insp_resp.get("Item")
+    if not inspection:
+        return build_response(404, {"error": f"Inspection '{inspection_id}' not found"})
+
+    inspection = convert_decimals(inspection)
+
+    # Update the specific checklist item
+    item_updated = False
+    if item_id is not None:
+        category_id = body.get("category_id")
+        for cat in inspection.get("categories", []):
+            if category_id is not None and cat.get("id") != category_id:
+                continue
+            for item in cat.get("items", []):
+                if item.get("id") == item_id:
+                    if "answer" in body:
+                        item["answer"] = body["answer"]
+                    if "finding" in body:
+                        item["finding"] = body["finding"]
+                    if "action_item" in body:
+                        item["action_item"] = body["action_item"]
+                    if "responsible" in body:
+                        item["responsible"] = body["responsible"]
+                    if "due_date" in body:
+                        item["due_date"] = body["due_date"]
+                    if "evidence" in body and isinstance(body["evidence"], list):
+                        existing = item.get("evidence", [])
+                        if not isinstance(existing, list):
+                            existing = []
+                        item["evidence"] = existing + body["evidence"]
+                    item_updated = True
+                    break
+            # Also check sub_sections (recordkeeping/HRA style)
+            if not item_updated:
+                for sub in cat.get("sub_sections", []):
+                    for item in sub.get("items", []):
+                        if item.get("id") == item_id:
+                            if "answer" in body:
+                                item["answer"] = body["answer"]
+                            if "finding" in body:
+                                item["finding"] = body["finding"]
+                            item_updated = True
+                            break
+                    if item_updated:
+                        break
+            if item_updated:
+                break
+
+    # Update top-level notes
+    if "notes" in body and isinstance(body["notes"], str):
+        inspection["notes"] = body["notes"].strip()
+
+    # Update general_results if provided
+    if "general_results" in body and isinstance(body["general_results"], list):
+        inspection["general_results"] = body["general_results"]
+
+    # Recompute status and timestamp
+    new_status = _session_compute_status(inspection, inspection_type)
+    inspection["status"] = new_status
+    inspection["updated_at"] = now_iso()
+
+    if new_status == "completed" and not inspection.get("completed_at"):
+        inspection["completed_at"] = now_iso()
+
+    # Save inspection back to the type-specific table
+    insp_table.put_item(Item=_sanitize_dynamodb(inspection))
+
+    # Update session table with current progress + status
+    progress = _session_progress(inspection, inspection_type)
+    next_item = _session_next_unanswered(inspection, inspection_type)
+
+    session_table.update_item(
+        Key={"session_id": session_id},
+        UpdateExpression="SET #st = :st, progress = :p, updated_at = :u, inspection_type = :it",
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={
+            ":st": new_status,
+            ":p": _sanitize_dynamodb(progress),
+            ":u": now_iso(),
+            ":it": inspection_type,
+        },
+    )
+
+    _invalidate_dashboard_cache()
+
+    return build_response(200, {
+        "saved": True,
+        "inspection_id": inspection_id,
+        "session_id": session_id,
+        "status": new_status,
+        "progress": progress,
+        "next_item_id": next_item,
+        "item_updated": item_updated,
+    })
+
+
+def resume_session(event):
+    """
+    GET /api/sessions/{session_id}/resume
+
+    Centralized resume endpoint. Returns the FULL inspection data with
+    progress tracking and the exact next_item_id to resume from.
+
+    Works for ALL 6 inspection types — replaces per-Lambda resume endpoints.
+    Sets status to in_progress and records the resume timestamp.
+    """
+    path_params = event.get("pathParameters") or {}
+    session_id = str(path_params.get("session_id", "")).strip()
+
+    if not session_id:
+        return build_response(400, {"error": "session_id is required"})
+
+    # Load session
+    session_resp = session_table.get_item(Key={"session_id": session_id})
+    session = session_resp.get("Item")
+    if not session:
+        return build_response(404, {"error": f"Session '{session_id}' not found"})
+
+    session = convert_decimals(session)
+    inspection_id = str(session.get("inspection_id", "") or "").strip()
+    inspection_type = str(session.get("inspection_type", "") or "").strip()
+
+    if not inspection_id:
+        # Session exists but no inspection yet — return session metadata
+        return build_response(200, {
+            "session_id": session_id,
+            "inspection_id": None,
+            "status": "pending",
+            "message": "No inspection linked yet. Start an inspection first.",
+            "session": {
+                "auditor_name": session.get("auditor_name", ""),
+                "facility_area": session.get("facility_area", ""),
+                "date_of_audit": session.get("date_of_audit", ""),
+                "station": session.get("station", ""),
+                "station_id": session.get("station_id", ""),
+            },
+        })
+
+    if not inspection_type:
+        # Last-ditch: search all 6 tables for this inspection_id
+        for label, tbl in inspection_tables.items():
+            try:
+                probe = tbl.get_item(Key={"inspection_id": inspection_id}).get("Item")
+                if probe:
+                    inspection_type = {v: k for k, v in INSPECTION_TYPE_TO_LABEL.items()}.get(label, "")
+                    if inspection_type:
+                        try:
+                            session_table.update_item(
+                                Key={"session_id": session_id},
+                                UpdateExpression="SET inspection_type = :it",
+                                ExpressionAttributeValues={":it": inspection_type},
+                            )
+                            logger.info(f"[SESSION] Fallback backfilled inspection_type='{inspection_type}' for session {session_id}")
+                        except Exception as update_err:
+                            logger.warning(f"[SESSION] Failed to backfill inspection_type: {update_err}")
+                        break
+            except Exception:
+                continue
+
+    insp_table = _get_inspection_table(inspection_type)
+    if not insp_table:
+        return build_response(400, {"error": f"Unknown inspection type '{inspection_type}'"})
+
+    insp_resp = insp_table.get_item(Key={"inspection_id": inspection_id})
+    inspection = insp_resp.get("Item")
+    if not inspection:
+        return build_response(404, {"error": f"Inspection '{inspection_id}' not found"})
+
+    inspection = convert_decimals(inspection)
+
+    # Compute progress and next item
+    progress = _session_progress(inspection, inspection_type)
+    next_item = _session_next_unanswered(inspection, inspection_type)
+
+    # Only update status if not already completed
+    current_status = str(inspection.get("status", "")).strip()
+    if current_status not in ("completed", "submitted", "passed", "failed"):
+        # ─── FIX: Use update_item instead of put_item ───
+        # put_item replaces the ENTIRE document, which overwrites any
+        # concurrent autosave writes that updated checklist answers.
+        # update_item only touches the status fields, preserving answers.
+        resume_ts = now_iso()
+        insp_table.update_item(
+            Key={"inspection_id": inspection_id},
+            UpdateExpression="SET #st = :st, resumed_at = :r, updated_at = :u",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":st": "in_progress",
+                ":r": resume_ts,
+                ":u": resume_ts,
+            },
+        )
+
+        # Re-read the inspection to get the LATEST data (including any
+        # answers saved by autosave that may have completed concurrently)
+        insp_resp = insp_table.get_item(Key={"inspection_id": inspection_id})
+        inspection = convert_decimals(insp_resp.get("Item", {}))
+
+        # Recompute progress from the fresh read
+        progress = _session_progress(inspection, inspection_type)
+        next_item = _session_next_unanswered(inspection, inspection_type)
+
+        session_table.update_item(
+            Key={"session_id": session_id},
+            UpdateExpression="SET #st = :st, resumed_at = :r, updated_at = :u, progress = :p",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":st": "in_progress",
+                ":r": resume_ts,
+                ":u": resume_ts,
+                ":p": _sanitize_dynamodb(progress),
+            },
+        )
+
+    # Map inspection_type back to category key for frontend
+    type_to_category = {v: k for k, v in CATEGORY_TO_INSPECTION_TYPE.items()}
+    category_key = type_to_category.get(inspection_type, inspection_type)
+
+    return build_response(200, {
+        "session_id": session_id,
+        "inspection_id": inspection_id,
+        "category": category_key,
+        "status": inspection.get("status", "in_progress"),
+        "progress": progress,
+        "next_item_id": next_item,
+        "resumed_at": inspection.get("resumed_at", ""),
+        "auditor_name": inspection.get("auditor_name", ""),
+        "facility_area": inspection.get("facility_area", ""),
+        "station": inspection.get("station", ""),
+        "station_id": inspection.get("station_id", ""),
+        "date_of_audit": inspection.get("date_of_audit", ""),
+        "categories": inspection.get("categories", []),
+        "general_results": inspection.get("general_results", []),
+        "notes": inspection.get("notes", ""),
+    })
+
+
+def get_inspection_details(event):
+    """
+    GET /api/inspections/{inspection_id}/details
+
+    Returns full inspection details by inspection_id.
+    Searches across all 6 inspection tables to find the record.
+    """
+    path_params = event.get("pathParameters") or {}
+    inspection_id = str(path_params.get("inspection_id", "")).strip()
+
+    if not inspection_id:
+        return build_response(400, {"error": "inspection_id is required"})
+
+    # Search all inspection tables in parallel
+    found_inspection = None
+    found_type = None
+
+    def _lookup(label, table):
+        try:
+            resp = table.get_item(Key={"inspection_id": inspection_id})
+            item = resp.get("Item")
+            if item:
+                return (convert_decimals(item), label)
+        except Exception as e:
+            logger.warning(f"[DETAILS] Error looking up {label}: {e}")
+        return None
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {executor.submit(_lookup, label, tbl): label for label, tbl in inspection_tables.items()}
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                found_inspection, found_type = result
+
+    if not found_inspection:
+        return build_response(404, {"error": f"Inspection '{inspection_id}' not found"})
+
+    # Find the inspection_type for progress computation
+    type_to_insp = {v: k for k, v in INSPECTION_TYPE_TO_LABEL.items()}
+    inspection_type = type_to_insp.get(found_type, "")
+    type_to_category = {v: k for k, v in CATEGORY_TO_INSPECTION_TYPE.items()}
+    category_key = type_to_category.get(inspection_type, "")
+
+    progress = _session_progress(found_inspection, inspection_type)
+
+    return build_response(200, {
+        "inspection_id": inspection_id,
+        "session_id": found_inspection.get("session_id", ""),
+        "type": found_type,
+        "category": category_key,
+        "status": found_inspection.get("status", ""),
+        "progress": progress,
+        "auditor_name": found_inspection.get("auditor_name", ""),
+        "facility_area": found_inspection.get("facility_area", ""),
+        "station": found_inspection.get("station", ""),
+        "station_id": found_inspection.get("station_id", ""),
+        "date_of_audit": found_inspection.get("date_of_audit", ""),
+        "categories": found_inspection.get("categories", []),
+        "general_results": found_inspection.get("general_results", []),
+        "notes": found_inspection.get("notes", ""),
+        "created_at": found_inspection.get("created_at", ""),
+        "updated_at": found_inspection.get("updated_at", ""),
+        "completed_at": found_inspection.get("completed_at", ""),
+    })
 
 
 # ═══════════════════════════════════════════════
@@ -1942,6 +2586,42 @@ def lambda_handler(event, context):
         ):
             logger.info("[ADMIN] Entering admin_list_inspections")
             return admin_list_inspections(event)
+
+        # ═══════════════════════════════════════════════
+        # Centralized Session Endpoints
+        # ═══════════════════════════════════════════════
+
+        # ── GET /api/sessions/find-draft ──
+        elif http_method == "GET" and (
+            resource == "/api/sessions/find-draft"
+            or path.rstrip("/").endswith("/api/sessions/find-draft")
+        ):
+            logger.info("[SESSION] Entering find_draft")
+            return find_draft(event)
+
+        # ── POST /api/sessions/autosave ──
+        elif http_method == "POST" and (
+            resource == "/api/sessions/autosave"
+            or path.rstrip("/").endswith("/api/sessions/autosave")
+        ):
+            logger.info("[SESSION] Entering autosave_inspection")
+            return autosave_inspection(event)
+
+        # ── GET /api/sessions/{session_id}/resume ──
+        elif http_method == "GET" and (
+            resource == "/api/sessions/{session_id}/resume"
+            or "/api/sessions/" in path and path.rstrip("/").endswith("/resume")
+        ):
+            logger.info("[SESSION] Entering resume_session")
+            return resume_session(event)
+
+        # ── GET /api/inspections/{inspection_id}/details ──
+        elif http_method == "GET" and (
+            resource == "/api/inspections/{inspection_id}/details"
+            or "/api/inspections/" in path and path.rstrip("/").endswith("/details")
+        ):
+            logger.info("[SESSION] Entering get_inspection_details")
+            return get_inspection_details(event)
 
         else:
             return build_response(404, {"error": f"Route not found: {http_method} {resource} (path: {path})"})
