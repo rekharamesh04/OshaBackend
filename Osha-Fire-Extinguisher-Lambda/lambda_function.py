@@ -94,12 +94,13 @@ COMPONENT_CONFIDENCE_BLOCK_THRESHOLD = float(os.getenv("COMPONENT_CONFIDENCE_BLO
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 
 try:
-    from checklist_loader import load_checklist, clear_cache, filter_disabled_items, get_company_config
+    from checklist_loader import load_checklist, clear_cache, filter_disabled_items, get_company_config, sync_inspection_with_template
 except ImportError:
     load_checklist = None
     clear_cache = None
     filter_disabled_items = None
     get_company_config = None
+    sync_inspection_with_template = None
 
 
 # ─────────────────────────────────────────────
@@ -1010,10 +1011,10 @@ def parse_body(event):
     return body if isinstance(body, dict) else {}
 
 
-def get_checklist_template(company_key="default"):
+def get_checklist_template(company_key="default", force_refresh=False):
     """Load checklist from DynamoDB with company overlay fallback. Falls back to hardcoded."""
     if load_checklist is not None:
-        template = load_checklist("fire-extinguisher", company_key)
+        template = load_checklist("fire-extinguisher", company_key, force_refresh=force_refresh)
         if template is not None:
             return template
     return copy.deepcopy(_FALLBACK_CHECKLIST)
@@ -1312,11 +1313,17 @@ def load_inspection_by_any_id(id_value: str):
 
 def find_item(inspection, item_id):
     """Find a checklist item by its ID. Returns (item, category_index, item_index) or (None, -1, -1)."""
-    target_id = int(item_id)
     for cat_idx, category in enumerate(inspection.get("categories", [])):
         for item_idx, item in enumerate(category.get("items", [])):
-            if int(item.get("id", -1)) == target_id:
+            stored_id = item.get("id")
+            if stored_id == item_id:
                 return item, cat_idx, item_idx
+            try:
+                if int(stored_id) == int(item_id):
+                    return item, cat_idx, item_idx
+            except (ValueError, TypeError):
+                if str(stored_id) == str(item_id):
+                    return item, cat_idx, item_idx
     return None, -1, -1
 
 
@@ -1417,10 +1424,10 @@ def merge_categories(existing_cats, incoming_cats):
     lookup = {}
     for cat in existing_cats:
         for item in cat.get("items", []):
-            lookup[int(item.get("id", 0))] = item
+            lookup[str(item.get("id"))] = item
     for cat in incoming_cats:
         for item in cat.get("items", []):
-            iid = int(item.get("id", 0))
+            iid = str(item.get("id"))
             if iid in lookup:
                 lookup[iid] = merge_item_records(lookup[iid], item)
             else:
@@ -1428,7 +1435,7 @@ def merge_categories(existing_cats, incoming_cats):
     for cat in existing_cats:
         new_items = []
         for item in cat.get("items", []):
-            iid = int(item.get("id", 0))
+            iid = str(item.get("id"))
             new_items.append(lookup.get(iid, item))
         cat["items"] = new_items
     return existing_cats
@@ -2389,7 +2396,7 @@ def _extract_image_from_request(body: dict) -> Tuple[Optional[bytes], str]:
 def get_checklist(event):
     params = event.get("queryStringParameters") or {}
     company_key = params.get("company_key", params.get("tenant_id", "default")).strip() or "default"
-    template = get_checklist_template(company_key)
+    template = get_checklist_template(company_key, force_refresh=True)
     if filter_disabled_items is not None:
         template = filter_disabled_items(template)
     return build_response(200, template)
@@ -2633,6 +2640,9 @@ def get_inspection(event):
     if not inspection_id:
         return build_response(400, {"error": "inspection_id is required in the URL path"})
 
+    params = event.get("queryStringParameters") or {}
+    company_key = str(params.get("company_key", params.get("tenant_id", ""))).strip()
+
     # ─────────────────────────────────────────────
     # FIX: Use load_inspection_by_any_id so that a session_id passed as the
     # path parameter also resolves correctly, matching File 1 behaviour.
@@ -2641,7 +2651,14 @@ def get_inspection(event):
     if not item:
         return build_response(404, {"error": "Inspection not found"})
 
-    description_lookup = build_description_lookup()
+    if company_key and company_key != "default" and sync_inspection_with_template is not None:
+        synced = sync_inspection_with_template(item, "fire-extinguisher", company_key)
+        if synced.get("categories") != item.get("categories"):
+            item = synced
+            item["updated_at"] = now_iso()
+            save_inspection(item)
+
+    description_lookup = build_description_lookup(company_key or "default")
     categories = item.get("categories", [])
     for category in categories:
         for checklist_item in category.get("items", []):
@@ -3170,6 +3187,108 @@ def analyze_item_image(event, _is_async=False):
         return build_response(400, {"error": "Provide image_base64 or file_key"})
 
     original_image_bytes = image_bytes
+
+    # ── Custom checklist items: generic visual compliance check ───────────
+    if str(item_id).startswith("custom_"):
+        bedrock_image_bytes, bedrock_type = prepare_image_bytes(
+            original_image_bytes, content_type, mode="",
+        )
+        question_text = (
+            checklist_item.get("description")
+            or checklist_item.get("title")
+            or "custom safety requirement"
+        )
+        custom_prompt = (
+            f"Inspect this workplace image against this custom safety question:\n"
+            f"Question: {question_text}\n\n"
+            f"Determine if the image provides enough visual evidence to answer YES.\n"
+            f"Return JSON only with keys: pass (bool), confidence (0-1), reason, "
+            f"worker_message, suggested_action, condition_checked (use 'custom_requirement')."
+        )
+        try:
+            analysis = invoke_claude_json(
+                "You are a workplace safety inspector. Return JSON only.",
+                custom_prompt,
+                image_bytes=bedrock_image_bytes,
+                media_type=bedrock_type,
+            )
+        except Exception as e:
+            return build_response(500, {"error": f"AI analysis failed: {str(e)}"})
+
+        passed = bool(analysis.get("pass", False))
+        confidence = float(analysis.get("confidence", 0.0) or 0.0)
+        reason = str(analysis.get("reason", "")).strip()
+        worker_message = str(analysis.get("worker_message", "")).strip()
+        suggested_action = analysis.get("suggested_action")
+        if suggested_action is not None:
+            suggested_action = str(suggested_action).strip() or None
+        condition_checked = str(analysis.get("condition_checked", "custom_requirement")).strip()
+        blocked = confidence < IMAGE_CONFIDENCE_BLOCK_THRESHOLD
+        finding_text, action_text = build_finding_and_action(
+            item_id, passed, blocked, reason, suggested_action, condition_checked,
+        )
+
+        evidence_record = {
+            "file_key": body.get("file_key") or body.get("fileKey") or "",
+            "analyzed_at": now_iso(),
+            "object_detected": "custom_requirement",
+            "condition_checked": condition_checked,
+            "pass": passed and not blocked,
+            "is_compliant": passed and not blocked,
+            "confidence": confidence,
+            "reason": reason,
+            "worker_message": worker_message,
+            "suggested_action": suggested_action or "",
+            "blocked": blocked,
+        }
+        checklist_item.setdefault("evidence", [])
+        checklist_item["evidence"].append(evidence_record)
+
+        if blocked:
+            checklist_item["blocked_by_wrong_image"] = True
+            checklist_item["answer"] = ""
+            checklist_item["finding"] = finding_text
+            checklist_item["action_item"] = action_text
+        else:
+            checklist_item["answer"] = "Yes" if passed else "No"
+            checklist_item["blocked_by_wrong_image"] = False
+            checklist_item["finding"] = finding_text
+            checklist_item["action_item"] = action_text
+
+        inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
+        update_summary_items(inspection)
+        inspection["status"] = compute_status(inspection)
+        inspection["updated_at"] = now_iso()
+        save_inspection(inspection)
+
+        _ck = str(body.get("company_key", "")).strip()
+        _verdict_label = "need_review"
+        if (blocked or not passed) and _ck and get_company_config:
+            try:
+                _verdict_label = get_company_config(_ck).get("blocked_verdict_label", "need_review")
+            except Exception:
+                pass
+
+        resp = {
+            "inspection_id": inspection_id,
+            "item_id": item_id,
+            "blocked": blocked,
+            "move_next": not blocked,
+            "pass": passed and not blocked,
+            "confidence": confidence,
+            "condition_checked": condition_checked,
+            "message": worker_message or "Custom item analyzed.",
+            "reason": finding_text,
+            "suggested_action": action_text,
+            "updated_item": checklist_item,
+            "inspection_status": inspection["status"],
+            "current_item_index": inspection.get("current_item_index", 0),
+            "inspection": inspection,
+            "categories": inspection.get("categories", []),
+        }
+        if blocked or not passed:
+            resp["blocked_verdict_label"] = _verdict_label
+        return build_response(200, resp)
 
     # ── Item 2: Frontend-decoded QR + AI extinguisher check ──────────────
     if str(item_id) == "2":

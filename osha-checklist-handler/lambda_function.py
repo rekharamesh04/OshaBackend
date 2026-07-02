@@ -32,12 +32,15 @@ from decimal import Decimal
 try:
     from checklist_loader import (
         load_checklist, clear_cache, filter_disabled_items,
+        sync_inspection_with_template, get_custom_item_ids,
         get_company_config, save_company_config, VALID_BLOCKED_LABELS,
     )
 except ImportError:
     load_checklist = None
     clear_cache = None
     filter_disabled_items = None
+    sync_inspection_with_template = None
+    get_custom_item_ids = None
     get_company_config = None
     save_company_config = None
     VALID_BLOCKED_LABELS = {"need_review", "fail"}
@@ -222,10 +225,10 @@ def build_response(status_code, body):
 # ─────────────────────────────────────────────
 # Helper: Get checklist template (DynamoDB → fallback)
 # ─────────────────────────────────────────────
-def get_checklist_template(company_key="default"):
+def get_checklist_template(company_key="default", force_refresh=False):
     """Load checklist from DynamoDB with company overlay fallback. Falls back to hardcoded."""
     if load_checklist is not None:
-        template = load_checklist("recordkeeping", company_key)
+        template = load_checklist("recordkeeping", company_key, force_refresh=force_refresh)
         if template is not None:
             return template
     return copy.deepcopy(_FALLBACK_CHECKLIST)
@@ -340,7 +343,7 @@ def get_checklist(event):
     """
     params = event.get("queryStringParameters") or {}
     company_key = params.get("company_key", params.get("tenant_id", "default")).strip() or "default"
-    template = get_checklist_template(company_key)
+    template = get_checklist_template(company_key, force_refresh=True)
     # Filter out disabled items for mobile — only return enabled questions
     if filter_disabled_items is not None:
         template = filter_disabled_items(template)
@@ -593,6 +596,9 @@ def get_inspection(event):
     if not inspection_id:
         return build_response(400, {"error": "inspection_id is required in the URL path"})
 
+    params = event.get("queryStringParameters") or {}
+    company_key = str(params.get("company_key", params.get("tenant_id", ""))).strip()
+
     # Fetch from DynamoDB
     result = table.get_item(Key={"inspection_id": inspection_id})
     item = result.get("Item")
@@ -602,6 +608,13 @@ def get_inspection(event):
 
     # Convert Decimal types
     item = convert_decimals(item)
+
+    if company_key and company_key != "default" and sync_inspection_with_template is not None:
+        synced = sync_inspection_with_template(item, "recordkeeping", company_key)
+        if synced.get("categories") != item.get("categories"):
+            item = synced
+            item["updated_at"] = datetime.now(timezone.utc).isoformat()
+            table.put_item(Item=_convert_floats_to_decimal(item))
 
     # Enrich items with descriptions from checklist template
     description_lookup = build_description_lookup()
@@ -1016,6 +1029,7 @@ def get_tenant_config(event):
             "company_key": company_key,
             "checklist_type": checklist_type,
             "disabled_items": [],
+            "disabled_custom_items": [],
             "custom_items": [],
             "message": "No customization - using full default checklist",
         })
@@ -1027,9 +1041,10 @@ def get_tenant_config(event):
 # ─────────────────────────────────────────────
 def toggle_checklist_item(event):
     """
-    Toggle a default checklist item on/off for a company.
+    Toggle a default or custom checklist item on/off for a company.
 
     Body: {"company_key": "cigroupusa", "item_id": 3, "enabled": false}
+    Body: {"company_key": "cigroupusa", "item_id": "custom_123", "enabled": false}
     """
     path_params = event.get("pathParameters", {}) or {}
     checklist_type = str(path_params.get("checklist_type", "")).strip()
@@ -1056,7 +1071,52 @@ def toggle_checklist_item(event):
     if enabled is None or not isinstance(enabled, bool):
         return build_response(400, {"error": "enabled must be true or false"})
 
-    # Validate item_id exists in default template
+    is_custom = isinstance(item_id, str) and str(item_id).startswith("custom_")
+    overlay = _get_or_create_overlay(company_key, checklist_type)
+    now = datetime.now(timezone.utc).isoformat()
+
+    if is_custom:
+        custom_id = str(item_id)
+        if get_custom_item_ids:
+            valid_custom = get_custom_item_ids(checklist_type, company_key)
+            if valid_custom and custom_id not in valid_custom:
+                return build_response(400, {"error": f"Custom item '{custom_id}' not found for company '{company_key}'"})
+
+        disabled_custom = [str(x) for x in overlay.get("disabled_custom_items", [])]
+        if enabled:
+            disabled_custom = [x for x in disabled_custom if x != custom_id]
+        elif custom_id not in disabled_custom:
+            disabled_custom.append(custom_id)
+
+        try:
+            templates_table.update_item(
+                Key={"tenant_id": company_key, "checklist_type": checklist_type},
+                UpdateExpression="SET #dci = :dci, #ua = :ua, #ci = if_not_exists(#ci, :empty), #ca = if_not_exists(#ca, :now)",
+                ExpressionAttributeNames={
+                    "#dci": "disabled_custom_items", "#ua": "updated_at",
+                    "#ci": "custom_items", "#ca": "created_at",
+                },
+                ExpressionAttributeValues={
+                    ":dci": disabled_custom,
+                    ":ua": now,
+                    ":empty": [],
+                    ":now": now,
+                },
+            )
+        except Exception as e:
+            return build_response(500, {"error": f"Failed to toggle custom item: {str(e)}"})
+
+        if clear_cache:
+            clear_cache()
+
+        action = "enabled" if enabled else "disabled"
+        return build_response(200, {
+            "message": f"Custom item {custom_id} {action} for company '{company_key}' in '{checklist_type}'",
+            "disabled_custom_items": disabled_custom,
+            "updated_at": now,
+        })
+
+    # Default item toggle
     try:
         from checklist_loader import get_default_item_ids
         valid_ids = get_default_item_ids(checklist_type)
@@ -1064,21 +1124,15 @@ def toggle_checklist_item(event):
         if valid_ids and normalized_id not in valid_ids:
             return build_response(400, {"error": f"item_id {item_id} does not exist in the default '{checklist_type}' checklist"})
     except Exception:
-        pass  # If validation fails, proceed anyway
+        pass
 
-    overlay = _get_or_create_overlay(company_key, checklist_type)
     disabled = [int(x) if isinstance(x, (int, float, Decimal)) else x for x in overlay.get("disabled_items", [])]
     normalized_item = int(item_id) if isinstance(item_id, (int, float)) else item_id
 
     if enabled:
-        # Remove from disabled list
         disabled = [x for x in disabled if x != normalized_item]
-    else:
-        # Add to disabled list
-        if normalized_item not in disabled:
-            disabled.append(normalized_item)
-
-    now = datetime.now(timezone.utc).isoformat()
+    elif normalized_item not in disabled:
+        disabled.append(normalized_item)
 
     try:
         templates_table.update_item(
@@ -1090,7 +1144,6 @@ def toggle_checklist_item(event):
                 ":ua": now,
             },
         )
-        # Ensure custom_items exists
         templates_table.update_item(
             Key={"tenant_id": company_key, "checklist_type": checklist_type},
             UpdateExpression="SET #ci = if_not_exists(#ci, :empty), #ca = if_not_exists(#ca, :now)",
@@ -1135,6 +1188,9 @@ def add_custom_item(event):
     company_key = str(body.get("company_key", body.get("tenant_id", ""))).strip()
     category_id = body.get("category_id")
     description = str(body.get("description", "")).strip()
+    requires_evidence = body.get("requires_evidence", True)
+    if not isinstance(requires_evidence, bool):
+        requires_evidence = True
 
     if not company_key:
         return build_response(400, {"error": "company_key is required"})
@@ -1154,6 +1210,7 @@ def add_custom_item(event):
         "description": description,
         "category_id": int(category_id) if isinstance(category_id, (int, float)) else category_id,
         "is_custom": True,
+        "requires_evidence": requires_evidence,
         "answer": "",
         "finding": "",
         "action_item": "",
@@ -1216,15 +1273,19 @@ def delete_custom_item(event):
     if len(new_custom) == len(custom_items):
         return build_response(404, {"error": f"Custom item '{item_id}' not found in overlay"})
 
+    disabled_custom = [str(x) for x in overlay.get("disabled_custom_items", []) if str(x) != item_id]
     now = datetime.now(timezone.utc).isoformat()
 
     try:
         templates_table.update_item(
             Key={"tenant_id": company_key, "checklist_type": checklist_type},
-            UpdateExpression="SET #ci = :ci, #ua = :ua",
-            ExpressionAttributeNames={"#ci": "custom_items", "#ua": "updated_at"},
+            UpdateExpression="SET #ci = :ci, #dci = :dci, #ua = :ua",
+            ExpressionAttributeNames={
+                "#ci": "custom_items", "#dci": "disabled_custom_items", "#ua": "updated_at",
+            },
             ExpressionAttributeValues={
                 ":ci": _convert_floats_to_decimal(new_custom),
+                ":dci": disabled_custom,
                 ":ua": now,
             },
         )
@@ -1238,7 +1299,6 @@ def delete_custom_item(event):
         "message": f"Custom item '{item_id}' removed from '{checklist_type}' for company '{company_key}'",
         "updated_at": now,
     })
-
 
 # ─────────────────────────────────────────────
 # DELETE /checklist-template/{checklist_type} — Delete Tenant Overlay (Revert to Default)

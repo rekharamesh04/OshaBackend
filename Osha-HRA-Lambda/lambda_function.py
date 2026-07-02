@@ -18,12 +18,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 try:
-    from checklist_loader import load_checklist, clear_cache, filter_disabled_items, get_company_config
+    from checklist_loader import load_checklist, clear_cache, filter_disabled_items, get_company_config, sync_inspection_with_template
 except ImportError:
     load_checklist = None
     clear_cache = None
     filter_disabled_items = None
     get_company_config = None
+    sync_inspection_with_template = None
 
 # Initialize DynamoDB
 dynamodb = boto3.resource("dynamodb")
@@ -250,10 +251,10 @@ def build_response(status_code, body):
 # ─────────────────────────────────────────────
 # Helper: Get checklist template (DynamoDB → fallback)
 # ─────────────────────────────────────────────
-def get_checklist_template(company_key="default"):
+def get_checklist_template(company_key="default", force_refresh=False):
     """Load checklist from DynamoDB with company overlay fallback. Falls back to hardcoded."""
     if load_checklist is not None:
-        template = load_checklist("hra", company_key)
+        template = load_checklist("hra", company_key, force_refresh=force_refresh)
         if template is not None:
             return template
     return copy.deepcopy(_FALLBACK_CHECKLIST)
@@ -301,7 +302,7 @@ def get_checklist(event):
     """
     params = event.get("queryStringParameters") or {}
     company_key = params.get("company_key", params.get("tenant_id", "default")).strip() or "default"
-    template = get_checklist_template(company_key)
+    template = get_checklist_template(company_key, force_refresh=True)
     if filter_disabled_items is not None:
         template = filter_disabled_items(template)
     return build_response(200, template)
@@ -468,6 +469,9 @@ def get_inspection(event):
     if not inspection_id:
         return build_response(400, {"error": "inspection_id is required in the URL path"})
 
+    params = event.get("queryStringParameters") or {}
+    company_key = str(params.get("company_key", params.get("tenant_id", ""))).strip()
+
     # Fetch from DynamoDB
     result = table.get_item(Key={"inspection_id": inspection_id})
     item = result.get("Item")
@@ -478,8 +482,15 @@ def get_inspection(event):
     # Convert Decimal types
     item = convert_decimals(item)
 
+    if company_key and company_key != "default" and sync_inspection_with_template is not None:
+        synced = sync_inspection_with_template(item, "hra", company_key)
+        if synced.get("categories") != item.get("categories"):
+            item = synced
+            item["updated_at"] = datetime.now(timezone.utc).isoformat()
+            table.put_item(Item=item)
+
     # Enrich items with descriptions from checklist template
-    description_lookup = build_description_lookup()
+    description_lookup = build_description_lookup(company_key or "default")
     categories = item.get("categories", [])
     for category in categories:
         for checklist_item in category.get("items", []):
@@ -609,4 +620,4 @@ def lambda_handler(event, context):
         return delete_inspection(event)
 
     else:
-        return build_response(404, {"error": f"Route not found: {http_method} {resource}"})
+        return build_response(404, {"error": f"Route not found: {http_method} {resource}"})
