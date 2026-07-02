@@ -1242,6 +1242,8 @@ def add_custom_item(event):
 
     return build_response(201, {
         "message": "Custom item added successfully",
+        "company_key": company_key,
+        "checklist_type": checklist_type,
         "custom_item": custom_item,
         "updated_at": now,
     })

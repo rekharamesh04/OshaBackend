@@ -103,6 +103,45 @@ except ImportError:
     sync_inspection_with_template = None
 
 
+def resolve_verdict_fields(company_key, passed, blocked):
+    """
+    Map AI outcome to admin-configured display labels.
+    Pass -> Pass; blocked/unclear -> need_review or fail (company config); clear fail -> Fail.
+    Returns (blocked_verdict_label or None, verdict_display).
+    """
+    if passed:
+        return None, "Pass"
+
+    company_key = str(company_key or "").strip()
+    if blocked:
+        label = "need_review"
+        if company_key and get_company_config:
+            try:
+                label = get_company_config(company_key).get("blocked_verdict_label", "need_review")
+            except Exception:
+                pass
+        display = "Need Verification" if label == "need_review" else "Fail"
+        return label, display
+
+    return "fail", "Fail"
+
+
+def enrich_analyze_response(result, company_key=""):
+    """Ensure analyze responses include verdict labels for mobile/admin UI."""
+    if not isinstance(result, dict):
+        return result
+    enriched = dict(result)
+    ck = str(enriched.get("company_key") or company_key or "").strip()
+    if ck:
+        enriched["company_key"] = ck
+    passed = bool(enriched.get("pass", False))
+    blocked = bool(enriched.get("blocked", False))
+    label, display = resolve_verdict_fields(ck, passed, blocked)
+    if label and "blocked_verdict_label" not in enriched:
+        enriched["blocked_verdict_label"] = label
+    enriched.setdefault("verdict_display", display)
+    return enriched
+
 # ─────────────────────────────────────────────
 # Checklist Definition — Fallback (used when DynamoDB is unreachable)
 # ─────────────────────────────────────────────
@@ -2269,6 +2308,8 @@ def process_async_analyze_worker(event):
         fake_event = {"body": json.dumps(body, default=str)}
         result = analyze_item_image(fake_event, _is_async=True)
         result_body = json.loads(result.get("body", "{}"))
+        company_key = str(body.get("company_key", "")).strip()
+        result_body = enrich_analyze_response(result_body, company_key)
         save_async_job(job_id, status="completed", result=result_body)
     except Exception as exc:
         logger.exception("Async worker failed")
@@ -2286,11 +2327,13 @@ def get_analyze_job_status(event):
         return build_response(404, {"error": "Job not found"})
     result = job.get("result")
     if job.get("job_status") == "completed" and isinstance(result, dict):
+        params = event.get("queryStringParameters") or {}
+        company_key = str(params.get("company_key", params.get("tenant_id", ""))).strip()
+        result = enrich_analyze_response(result, company_key)
         inspection_id = str(result.get("inspection_id", "")).strip()
         if inspection_id:
             fresh = load_inspection(inspection_id)
             if fresh:
-                result = dict(result)
                 result["inspection"] = fresh
                 result["categories"] = fresh.get("categories", [])
                 result["inspection_status"] = fresh.get("status", "in_progress")
@@ -2397,8 +2440,32 @@ def get_checklist(event):
     params = event.get("queryStringParameters") or {}
     company_key = params.get("company_key", params.get("tenant_id", "default")).strip() or "default"
     template = get_checklist_template(company_key, force_refresh=True)
+
+    enabled_before_filter = 0
+    overlay_custom_count = 0
+    if company_key != "default":
+        try:
+            from checklist_loader import load_company_overlay
+            overlay = load_company_overlay("fire-extinguisher", company_key)
+            if overlay:
+                overlay_custom_count = len(overlay.get("custom_items", []))
+        except Exception:
+            pass
+    if template:
+        for cat in template.get("categories", []):
+            enabled_before_filter += sum(
+                1 for item in cat.get("items", []) if item.get("is_enabled", True)
+            )
+
     if filter_disabled_items is not None:
         template = filter_disabled_items(template)
+
+    if isinstance(template, dict):
+        template = dict(template)
+        template["company_key"] = company_key
+        template["enabled_items_before_filter"] = enabled_before_filter
+        template["overlay_custom_item_count"] = overlay_custom_count
+
     return build_response(200, template)
 
 
@@ -3262,12 +3329,7 @@ def analyze_item_image(event, _is_async=False):
         save_inspection(inspection)
 
         _ck = str(body.get("company_key", "")).strip()
-        _verdict_label = "need_review"
-        if (blocked or not passed) and _ck and get_company_config:
-            try:
-                _verdict_label = get_company_config(_ck).get("blocked_verdict_label", "need_review")
-            except Exception:
-                pass
+        _verdict_label, _verdict_display = resolve_verdict_fields(_ck, passed and not blocked, blocked)
 
         resp = {
             "inspection_id": inspection_id,
@@ -3285,8 +3347,11 @@ def analyze_item_image(event, _is_async=False):
             "current_item_index": inspection.get("current_item_index", 0),
             "inspection": inspection,
             "categories": inspection.get("categories", []),
+            "verdict_display": _verdict_display,
         }
-        if blocked or not passed:
+        if _ck:
+            resp["company_key"] = _ck
+        if _verdict_label:
             resp["blocked_verdict_label"] = _verdict_label
         return build_response(200, resp)
 
@@ -3319,7 +3384,9 @@ def analyze_item_image(event, _is_async=False):
             inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
             inspection["updated_at"] = now_iso()
             save_inspection(inspection)
-            return build_response(200, {
+            _ck = str(body.get("company_key", "")).strip()
+            _verdict_label, _verdict_display = resolve_verdict_fields(_ck, False, blocked)
+            resp_body = {
                 "inspection_id":      inspection_id,
                 "item_id":            item_id,
                 "blocked":            blocked,
@@ -3337,7 +3404,13 @@ def analyze_item_image(event, _is_async=False):
                 "inference_source":   "frontend_qr_decode",
                 "inspection":         inspection,
                 "categories":         inspection.get("categories", []),
-            })
+                "verdict_display":    _verdict_display,
+            }
+            if _ck:
+                resp_body["company_key"] = _ck
+            if _verdict_label:
+                resp_body["blocked_verdict_label"] = _verdict_label
+            return build_response(200, resp_body)
 
         qr_height_cm_raw = body.get("qr_height_cm")
         station_id_raw   = str(body.get("station_id") or "").strip()
@@ -3932,15 +4005,9 @@ def analyze_item_image(event, _is_async=False):
 
         # Resolve company-level blocked verdict label
         _company_key = str(body.get("company_key", "")).strip()
-        _verdict_label = "need_review"
-        if _company_key and get_company_config:
-            try:
-                _cfg = get_company_config(_company_key)
-                _verdict_label = _cfg.get("blocked_verdict_label", "need_review")
-            except Exception:
-                pass
+        _verdict_label, _verdict_display = resolve_verdict_fields(_company_key, False, True)
 
-        return build_response(200, {
+        blocked_body = {
             "inspection_id":      inspection_id,
             "item_id":            item_id,
             "blocked":            True,
@@ -3950,6 +4017,7 @@ def analyze_item_image(event, _is_async=False):
             "condition_checked":  condition_checked,
             "confidence":         confidence,
             "blocked_verdict_label": _verdict_label,
+            "verdict_display":    _verdict_display,
             "message":            worker_message or ("Target component not clear. Move closer and retake." if component_focus else "No fire extinguisher detected. Point camera directly at the extinguisher."),
             "reason":             finding_text,
             "suggested_action":   blocked_suggested_action or action_text,
@@ -3958,7 +4026,10 @@ def analyze_item_image(event, _is_async=False):
             "current_item_index": inspection.get("current_item_index", 0),
             "inspection":         inspection,
             "categories":         inspection.get("categories", []),
-        })
+        }
+        if _company_key:
+            blocked_body["company_key"] = _company_key
+        return build_response(200, blocked_body)
 
     # Record pass/fail answer
     if str(item_id) in ["1"]:
@@ -3988,14 +4059,10 @@ def analyze_item_image(event, _is_async=False):
 
     # Resolve company-level verdict label for non-pass results
     _verdict_label_final = None
+    _verdict_display = "Pass" if passed else "Fail"
     if not passed:
         _ck = str(body.get("company_key", "")).strip()
-        _verdict_label_final = "need_review"
-        if _ck and get_company_config:
-            try:
-                _verdict_label_final = get_company_config(_ck).get("blocked_verdict_label", "need_review")
-            except Exception:
-                pass
+        _verdict_label_final, _verdict_display = resolve_verdict_fields(_ck, False, False)
 
     resp_body = {
         "inspection_id":      inspection_id,
@@ -4017,9 +4084,13 @@ def analyze_item_image(event, _is_async=False):
         "next_item_index":    inspection.get("current_item_index", 0),
         "inspection":         inspection,
         "categories":         inspection.get("categories", []),
+        "verdict_display":    _verdict_display,
     }
     if _verdict_label_final is not None:
         resp_body["blocked_verdict_label"] = _verdict_label_final
+    _ck = str(body.get("company_key", "")).strip()
+    if _ck:
+        resp_body["company_key"] = _ck
 
     return build_response(200, resp_body)
 
