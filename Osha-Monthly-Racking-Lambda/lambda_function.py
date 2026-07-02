@@ -83,13 +83,20 @@ VALID_OBJECTS = {
 EXPECTED_API_KEY = os.getenv("API_KEY", "").strip()
 
 try:
-    from checklist_loader import load_checklist, clear_cache, filter_disabled_items, get_company_config, sync_inspection_with_template
+    from checklist_loader import (
+        load_checklist, clear_cache, filter_disabled_items, get_company_config,
+        sync_inspection_with_template, resolve_verdict_fields, enrich_analyze_response,
+        build_mobile_checklist_response,
+    )
 except ImportError:
     load_checklist = None
     clear_cache = None
     filter_disabled_items = None
     get_company_config = None
     sync_inspection_with_template = None
+    resolve_verdict_fields = None
+    enrich_analyze_response = None
+    build_mobile_checklist_response = None
 
 
 # ─────────────────────────────────────────────
@@ -1044,15 +1051,11 @@ def analyze_item_image(event):
 
         # Resolve company-level blocked verdict label
         _company_key = str(body.get("company_key", "")).strip()
-        _verdict_label = "need_review"
-        if _company_key and get_company_config:
-            try:
-                _cfg = get_company_config(_company_key)
-                _verdict_label = _cfg.get("blocked_verdict_label", "need_review")
-            except Exception:
-                pass
+        _verdict_label, _verdict_display = ("need_review", "Need Verification")
+        if resolve_verdict_fields is not None:
+            _verdict_label, _verdict_display = resolve_verdict_fields(_company_key, False, True)
 
-        return build_response(200, {
+        blocked_resp = {
             "inspection_id": inspection.get("inspection_id", inspection_id),
             "item_id": item_id,
             "blocked": True,
@@ -1062,6 +1065,7 @@ def analyze_item_image(event):
             "condition_checked": best.get("condition_checked"),
             "confidence": best.get("confidence"),
             "blocked_verdict_label": _verdict_label,
+            "verdict_display": _verdict_display,
             "message": best.get("worker_message") or "Checklist item is not clearly visible.",
             "reason": best.get("reason"),
             "suggested_action": best.get("suggested_action"),
@@ -1069,7 +1073,10 @@ def analyze_item_image(event):
             "inspection_status": inspection.get("status", "in_progress"),
             "inspection": inspection,
             "categories": inspection.get("categories", []),
-        })
+        }
+        if _company_key:
+            blocked_resp["company_key"] = _company_key
+        return build_response(200, blocked_resp)
 
     passed_overall = bool(best.get("pass", False)) and not best.get("blocked", False)
     checklist_item["blocked_by_wrong_image"] = False
@@ -1093,14 +1100,10 @@ def analyze_item_image(event):
 
     # Resolve company-level verdict label for non-pass results
     _verdict_label_final = None
-    if not passed_overall:
+    _verdict_display = "Pass" if passed_overall else "Fail"
+    if not passed_overall and resolve_verdict_fields is not None:
         _ck = str(body.get("company_key", "")).strip()
-        _verdict_label_final = "need_review"
-        if _ck and get_company_config:
-            try:
-                _verdict_label_final = get_company_config(_ck).get("blocked_verdict_label", "need_review")
-            except Exception:
-                pass
+        _verdict_label_final, _verdict_display = resolve_verdict_fields(_ck, False, False)
 
     resp_body = {
         "inspection_id": inspection.get("inspection_id", inspection_id),
@@ -1123,9 +1126,13 @@ def analyze_item_image(event):
         "current_item_index": inspection.get("current_item_index", 0),
         "inspection": inspection,
         "categories": inspection.get("categories", []),
+        "verdict_display": _verdict_display,
     }
     if _verdict_label_final is not None:
         resp_body["blocked_verdict_label"] = _verdict_label_final
+    _ck = str(body.get("company_key", "")).strip()
+    if _ck:
+        resp_body["company_key"] = _ck
 
     return build_response(200, resp_body)
 
@@ -1495,7 +1502,9 @@ def get_checklist(event):
     params = event.get("queryStringParameters") or {}
     company_key = params.get("company_key", params.get("tenant_id", "default")).strip() or "default"
     template = get_checklist_template(company_key, force_refresh=True)
-    if filter_disabled_items is not None:
+    if build_mobile_checklist_response is not None and template is not None:
+        template = build_mobile_checklist_response(template, "racking", company_key)
+    elif filter_disabled_items is not None:
         template = filter_disabled_items(template)
     return build_response(200, template)
 

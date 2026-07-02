@@ -94,53 +94,20 @@ COMPONENT_CONFIDENCE_BLOCK_THRESHOLD = float(os.getenv("COMPONENT_CONFIDENCE_BLO
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 
 try:
-    from checklist_loader import load_checklist, clear_cache, filter_disabled_items, get_company_config, sync_inspection_with_template
+    from checklist_loader import (
+        load_checklist, clear_cache, filter_disabled_items, get_company_config,
+        sync_inspection_with_template, resolve_verdict_fields, enrich_analyze_response,
+        build_mobile_checklist_response,
+    )
 except ImportError:
     load_checklist = None
     clear_cache = None
     filter_disabled_items = None
     get_company_config = None
     sync_inspection_with_template = None
-
-
-def resolve_verdict_fields(company_key, passed, blocked):
-    """
-    Map AI outcome to admin-configured display labels.
-    Pass -> Pass; blocked/unclear -> need_review or fail (company config); clear fail -> Fail.
-    Returns (blocked_verdict_label or None, verdict_display).
-    """
-    if passed:
-        return None, "Pass"
-
-    company_key = str(company_key or "").strip()
-    if blocked:
-        label = "need_review"
-        if company_key and get_company_config:
-            try:
-                label = get_company_config(company_key).get("blocked_verdict_label", "need_review")
-            except Exception:
-                pass
-        display = "Need Verification" if label == "need_review" else "Fail"
-        return label, display
-
-    return "fail", "Fail"
-
-
-def enrich_analyze_response(result, company_key=""):
-    """Ensure analyze responses include verdict labels for mobile/admin UI."""
-    if not isinstance(result, dict):
-        return result
-    enriched = dict(result)
-    ck = str(enriched.get("company_key") or company_key or "").strip()
-    if ck:
-        enriched["company_key"] = ck
-    passed = bool(enriched.get("pass", False))
-    blocked = bool(enriched.get("blocked", False))
-    label, display = resolve_verdict_fields(ck, passed, blocked)
-    if label and "blocked_verdict_label" not in enriched:
-        enriched["blocked_verdict_label"] = label
-    enriched.setdefault("verdict_display", display)
-    return enriched
+    resolve_verdict_fields = None
+    enrich_analyze_response = None
+    build_mobile_checklist_response = None
 
 # ─────────────────────────────────────────────
 # Checklist Definition — Fallback (used when DynamoDB is unreachable)
@@ -2309,7 +2276,8 @@ def process_async_analyze_worker(event):
         result = analyze_item_image(fake_event, _is_async=True)
         result_body = json.loads(result.get("body", "{}"))
         company_key = str(body.get("company_key", "")).strip()
-        result_body = enrich_analyze_response(result_body, company_key)
+        if enrich_analyze_response is not None:
+            result_body = enrich_analyze_response(result_body, company_key)
         save_async_job(job_id, status="completed", result=result_body)
     except Exception as exc:
         logger.exception("Async worker failed")
@@ -2440,32 +2408,10 @@ def get_checklist(event):
     params = event.get("queryStringParameters") or {}
     company_key = params.get("company_key", params.get("tenant_id", "default")).strip() or "default"
     template = get_checklist_template(company_key, force_refresh=True)
-
-    enabled_before_filter = 0
-    overlay_custom_count = 0
-    if company_key != "default":
-        try:
-            from checklist_loader import load_company_overlay
-            overlay = load_company_overlay("fire-extinguisher", company_key)
-            if overlay:
-                overlay_custom_count = len(overlay.get("custom_items", []))
-        except Exception:
-            pass
-    if template:
-        for cat in template.get("categories", []):
-            enabled_before_filter += sum(
-                1 for item in cat.get("items", []) if item.get("is_enabled", True)
-            )
-
-    if filter_disabled_items is not None:
+    if build_mobile_checklist_response is not None and template is not None:
+        template = build_mobile_checklist_response(template, "fire-extinguisher", company_key)
+    elif filter_disabled_items is not None:
         template = filter_disabled_items(template)
-
-    if isinstance(template, dict):
-        template = dict(template)
-        template["company_key"] = company_key
-        template["enabled_items_before_filter"] = enabled_before_filter
-        template["overlay_custom_item_count"] = overlay_custom_count
-
     return build_response(200, template)
 
 

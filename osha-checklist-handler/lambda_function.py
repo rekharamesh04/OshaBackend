@@ -34,6 +34,7 @@ try:
         load_checklist, clear_cache, filter_disabled_items,
         sync_inspection_with_template, get_custom_item_ids,
         get_company_config, save_company_config, VALID_BLOCKED_LABELS,
+        build_mobile_checklist_response,
     )
 except ImportError:
     load_checklist = None
@@ -44,6 +45,7 @@ except ImportError:
     get_company_config = None
     save_company_config = None
     VALID_BLOCKED_LABELS = {"need_review", "fail"}
+    build_mobile_checklist_response = None
 
 # Initialize DynamoDB
 dynamodb = boto3.resource("dynamodb")
@@ -344,8 +346,9 @@ def get_checklist(event):
     params = event.get("queryStringParameters") or {}
     company_key = params.get("company_key", params.get("tenant_id", "default")).strip() or "default"
     template = get_checklist_template(company_key, force_refresh=True)
-    # Filter out disabled items for mobile — only return enabled questions
-    if filter_disabled_items is not None:
+    if build_mobile_checklist_response is not None and template is not None:
+        template = build_mobile_checklist_response(template, "recordkeeping", company_key)
+    elif filter_disabled_items is not None:
         template = filter_disabled_items(template)
     return build_response(200, template)
 

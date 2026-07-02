@@ -18,13 +18,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 try:
-    from checklist_loader import load_checklist, clear_cache, filter_disabled_items, get_company_config, sync_inspection_with_template
+    from checklist_loader import load_checklist, clear_cache, filter_disabled_items, get_company_config, sync_inspection_with_template, build_mobile_checklist_response
 except ImportError:
     load_checklist = None
     clear_cache = None
     filter_disabled_items = None
     get_company_config = None
     sync_inspection_with_template = None
+    build_mobile_checklist_response = None
 
 # Initialize DynamoDB
 dynamodb = boto3.resource("dynamodb")
@@ -303,7 +304,9 @@ def get_checklist(event):
     params = event.get("queryStringParameters") or {}
     company_key = params.get("company_key", params.get("tenant_id", "default")).strip() or "default"
     template = get_checklist_template(company_key, force_refresh=True)
-    if filter_disabled_items is not None:
+    if build_mobile_checklist_response is not None and template is not None:
+        template = build_mobile_checklist_response(template, "hra", company_key)
+    elif filter_disabled_items is not None:
         template = filter_disabled_items(template)
     return build_response(200, template)
 

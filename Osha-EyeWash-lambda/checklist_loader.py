@@ -396,6 +396,74 @@ def save_company_config(company_key: str, blocked_verdict_label: str) -> dict:
     return {"blocked_verdict_label": blocked_verdict_label, "updated_at": now}
 
 
+def resolve_verdict_fields(company_key, passed, blocked):
+    """
+    Map AI outcome to admin-configured display labels.
+    Pass -> Pass; blocked/unclear -> need_review or fail (company config); clear fail -> Fail.
+    Returns (blocked_verdict_label or None, verdict_display).
+    """
+    if passed:
+        return None, "Pass"
+
+    company_key = str(company_key or "").strip()
+    if blocked:
+        label = "need_review"
+        if company_key:
+            try:
+                label = get_company_config(company_key).get("blocked_verdict_label", "need_review")
+            except Exception:
+                pass
+        display = "Need Verification" if label == "need_review" else "Fail"
+        return label, display
+
+    return "fail", "Fail"
+
+
+def enrich_analyze_response(result, company_key=""):
+    """Ensure analyze responses include verdict labels for mobile/admin UI."""
+    if not isinstance(result, dict):
+        return result
+    enriched = dict(result)
+    ck = str(enriched.get("company_key") or company_key or "").strip()
+    if ck:
+        enriched["company_key"] = ck
+    passed = bool(enriched.get("pass", False))
+    blocked = bool(enriched.get("blocked", False))
+    label, display = resolve_verdict_fields(ck, passed, blocked)
+    if label and "blocked_verdict_label" not in enriched:
+        enriched["blocked_verdict_label"] = label
+    enriched.setdefault("verdict_display", display)
+    return enriched
+
+
+def build_mobile_checklist_response(template, checklist_type, company_key):
+    """
+    Filter disabled items for mobile and attach overlay debug metadata.
+    Counts enabled items before filtering to help diagnose custom-question issues.
+    """
+    if not isinstance(template, dict):
+        return template
+
+    enabled_before = 0
+    for cat in template.get("categories", []):
+        enabled_before += sum(
+            1 for item in cat.get("items", []) if item.get("is_enabled", True)
+        )
+
+    overlay_custom_count = 0
+    if company_key and company_key != "default":
+        overlay = load_company_overlay(checklist_type, company_key)
+        if overlay:
+            overlay_custom_count = len(overlay.get("custom_items", []))
+
+    filtered = filter_disabled_items(template)
+    filtered = dict(filtered)
+    filtered["company_key"] = company_key
+    filtered["enabled_items_before_filter"] = enabled_before
+    filtered["overlay_custom_item_count"] = overlay_custom_count
+    return filtered
+
+
 def clear_cache():
     """Clear the in-memory cache. Useful after CRUD updates or for testing."""
     _CACHE.clear()
