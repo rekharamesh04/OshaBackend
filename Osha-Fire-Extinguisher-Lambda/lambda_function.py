@@ -1317,6 +1317,38 @@ def load_inspection_by_any_id(id_value: str):
     return load_inspection_by_session_id(id_value)
 
 
+def _numeric_item_id(item_or_id):
+    """Return int ID for default checklist items, or None for custom string IDs."""
+    raw = item_or_id.get("id", 0) if isinstance(item_or_id, dict) else item_or_id
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _link_session_to_inspection(session_id, inspection_id, inspection_type="fire-extinguisher"):
+    """Stamp inspection_id + inspection_type on the shared session row for autosave/resume."""
+    session_id = str(session_id or "").strip()
+    inspection_id = str(inspection_id or "").strip()
+    if not session_id or not inspection_id:
+        return
+    try:
+        sessions_table.update_item(
+            Key={"session_id": session_id},
+            UpdateExpression="SET inspection_id = :iid, inspection_type = :itype, updated_at = :u",
+            ExpressionAttributeValues={
+                ":iid": inspection_id,
+                ":itype": inspection_type,
+                ":u": now_iso(),
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to link session %s to inspection %s (%s)",
+            session_id, inspection_id, inspection_type,
+        )
+
+
 def find_item(inspection, item_id):
     """Find a checklist item by its ID. Returns (item, category_index, item_index) or (None, -1, -1)."""
     for cat_idx, category in enumerate(inspection.get("categories", [])):
@@ -1344,7 +1376,7 @@ def get_all_items(inspection):
 def next_unanswered_index(inspection):
     for cat_idx, cat in enumerate(inspection.get("categories", [])):
         for item_idx, item in enumerate(cat.get("items", [])):
-            iid = int(item.get("id", 0))
+            iid = _numeric_item_id(item)
             if iid in (11, 12):
                 continue
             if not item.get("answer", "").strip() or item.get("blocked_by_wrong_image"):
@@ -1386,7 +1418,7 @@ def update_summary_items(inspection):
     total_inspected = 0
     total_compliant = 0
     for item in get_all_items(inspection):
-        iid = int(item.get("id", 0))
+        iid = _numeric_item_id(item)
         if iid in (11, 12):
             continue
         for ev in item.get("evidence", []):
@@ -2554,9 +2586,11 @@ def create_inspection(event):
             "updated_at":         updated_at,
         })
         save_inspection(record)
+        linked_session_id = session_id or existing.get("session_id", "")
+        _link_session_to_inspection(linked_session_id, inspection_id)
         return build_response(200, {
             "inspection_id": inspection_id,
-            "session_id":    session_id or existing.get("session_id", ""),
+            "session_id":    linked_session_id,
             "created_at":    created_at,
             "updated_at":    updated_at,
             "status":        record["status"],
@@ -2566,16 +2600,6 @@ def create_inspection(event):
     # No existing record — create brand new
     if not inspection_id:
         inspection_id = str(uuid.uuid4())
-        # Persist newly generated inspection_id back to session record if possible
-        if session_id:
-            try:
-                sessions_table.update_item(
-                    Key={"session_id": session_id},
-                    UpdateExpression="SET inspection_id = :iid",
-                    ExpressionAttributeValues={":iid": inspection_id},
-                )
-            except Exception:
-                logger.exception("Failed to persist generated inspection_id back to sessions_table")
 
     created_at = now_iso()
     record = {
@@ -2597,6 +2621,7 @@ def create_inspection(event):
         "updated_at":         created_at,
     }
     save_inspection(record)
+    _link_session_to_inspection(session_id, inspection_id)
     return build_response(201, {
         "inspection_id": inspection_id,
         "session_id":    session_id,
@@ -4051,7 +4076,7 @@ def compute_progress(inspection):
     answered = 0
     for cat in inspection.get("categories", []):
         for item in cat.get("items", []):
-            iid = int(item.get("id", 0))
+            iid = _numeric_item_id(item)
             if iid in (11, 12):
                 continue
             total += 1
@@ -4065,11 +4090,11 @@ def find_next_unanswered(inspection):
     """Return the item ID of the next unanswered checklist item, skipping 11 & 12."""
     for cat in inspection.get("categories", []):
         for item in cat.get("items", []):
-            iid = int(item.get("id", 0))
+            iid = _numeric_item_id(item)
             if iid in (11, 12):
                 continue
             if not item.get("answer", "").strip():
-                return iid
+                return item.get("id")
     return None
 
 

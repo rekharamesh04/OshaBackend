@@ -1014,6 +1014,24 @@ def create_inspection_from_session_payload(event: dict) -> dict:
     })
     save_inspection(record)
 
+    # Stamp shared session so Dashboard autosave can resolve the inspection table.
+    if preserved_sid:
+        try:
+            session_table.update_item(
+                Key={"session_id": preserved_sid},
+                UpdateExpression="SET inspection_id = :iid, inspection_type = :itype, updated_at = :u",
+                ExpressionAttributeValues={
+                    ":iid": inspection_id,
+                    ":itype": "eyewash",
+                    ":u": updated_at,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Failed to link session %s to inspection %s (eyewash)",
+                preserved_sid, inspection_id,
+            )
+
     status_code = 201 if not existing else 200
     return json_response(status_code, {
         "inspection_id": inspection_id, "session_id": preserved_sid,

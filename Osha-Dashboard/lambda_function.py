@@ -296,6 +296,91 @@ def _get_inspection_table_by_category(category_key):
     return None
 
 
+def _resolve_session_inspection_type(session, session_id, inspection_id, body_hint=None):
+    """
+    Resolve inspection_type for a session.
+
+    Order:
+      1. Existing session.inspection_type
+      2. Optional body hint (inspection_type or category from client)
+      3. Probe all inspection tables by inspection_id and backfill session
+    """
+    inspection_type = str((session or {}).get("inspection_type", "") or "").strip()
+    if inspection_type and _get_inspection_table(inspection_type):
+        return inspection_type
+
+    hint = str(body_hint or "").strip()
+    if hint:
+        if hint in INSPECTION_TYPE_TO_LABEL:
+            inspection_type = hint
+        elif hint in CATEGORY_TO_INSPECTION_TYPE:
+            inspection_type = CATEGORY_TO_INSPECTION_TYPE[hint]
+        if inspection_type and _get_inspection_table(inspection_type):
+            try:
+                session_table.update_item(
+                    Key={"session_id": session_id},
+                    UpdateExpression="SET inspection_type = :it",
+                    ExpressionAttributeValues={":it": inspection_type},
+                )
+                logger.info(
+                    "[SESSION] Backfilled inspection_type='%s' from body hint for session %s",
+                    inspection_type, session_id,
+                )
+            except Exception as update_err:
+                logger.warning("[SESSION] Failed to backfill inspection_type from hint: %s", update_err)
+            return inspection_type
+
+    inspection_id = str(inspection_id or "").strip()
+    if not inspection_id:
+        return ""
+
+    label_to_type = {v: k for k, v in INSPECTION_TYPE_TO_LABEL.items()}
+    for label, tbl in inspection_tables.items():
+        try:
+            probe = tbl.get_item(Key={"inspection_id": inspection_id}).get("Item")
+            if not probe:
+                continue
+            inspection_type = label_to_type.get(label, "")
+            if not inspection_type:
+                continue
+            try:
+                session_table.update_item(
+                    Key={"session_id": session_id},
+                    UpdateExpression="SET inspection_type = :it",
+                    ExpressionAttributeValues={":it": inspection_type},
+                )
+                logger.info(
+                    "[SESSION] Fallback backfilled inspection_type='%s' for session %s",
+                    inspection_type, session_id,
+                )
+            except Exception as update_err:
+                logger.warning("[SESSION] Failed to backfill inspection_type: %s", update_err)
+            return inspection_type
+        except Exception:
+            continue
+    return ""
+
+
+def _ids_match(a, b):
+    """Compare checklist/category IDs across int, Decimal, and custom string forms."""
+    if a is None or b is None:
+        return False
+    if a == b:
+        return True
+    try:
+        return int(a) == int(b)
+    except (ValueError, TypeError):
+        return str(a) == str(b)
+
+
+def _numeric_id(raw):
+    """Return int ID for default items/categories, or None for custom string IDs."""
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return None
+
+
 def _session_progress(inspection, inspection_type=""):
     """Compute progress for any inspection type. Returns {total, answered, percentage}."""
     skip_ids = SUMMARY_ITEM_IDS.get(inspection_type, set())
@@ -303,8 +388,8 @@ def _session_progress(inspection, inspection_type=""):
     answered = 0
     for cat in inspection.get("categories", []):
         for item in cat.get("items", []):
-            iid = item.get("id")
-            if isinstance(iid, int) and iid in skip_ids:
+            iid = _numeric_id(item.get("id"))
+            if iid is not None and iid in skip_ids:
                 continue
             total += 1
             if str(item.get("answer") or "").strip():
@@ -323,11 +408,11 @@ def _session_next_unanswered(inspection, inspection_type=""):
     skip_ids = SUMMARY_ITEM_IDS.get(inspection_type, set())
     for cat in inspection.get("categories", []):
         for item in cat.get("items", []):
-            iid = item.get("id")
-            if isinstance(iid, int) and iid in skip_ids:
+            iid = _numeric_id(item.get("id"))
+            if iid is not None and iid in skip_ids:
                 continue
             if not str(item.get("answer") or "").strip():
-                return iid
+                return item.get("id")
         for sub in cat.get("sub_sections", []):
             for item in sub.get("items", []):
                 if not str(item.get("answer") or "").strip():
@@ -2171,10 +2256,15 @@ def autosave_inspection(event):
         return build_response(404, {"error": f"Session '{session_id}' not found"})
 
     inspection_id = str(session.get("inspection_id", "") or "").strip()
-    inspection_type = str(session.get("inspection_type", "") or "").strip()
-
     if not inspection_id:
         return build_response(400, {"error": "No inspection linked to this session. Start an inspection first."})
+
+    # Resolve type from session, optional body hint, or by probing inspection tables.
+    # Older sessions may only have inspection_id stamped (empty inspection_type).
+    body_hint = body.get("inspection_type") or body.get("category") or body.get("category_key")
+    inspection_type = _resolve_session_inspection_type(
+        session, session_id, inspection_id, body_hint=body_hint,
+    )
 
     insp_table = _get_inspection_table(inspection_type)
     if not insp_table:
@@ -2188,47 +2278,70 @@ def autosave_inspection(event):
 
     inspection = convert_decimals(inspection)
 
-    # Update the specific checklist item
+    # Update the specific checklist item.
+    # category_id is an optional hint only — always fall back to full search so a
+    # frontend 1-based index / type mismatch cannot silently drop the write.
     item_updated = False
     if item_id is not None:
         category_id = body.get("category_id")
-        for cat in inspection.get("categories", []):
-            if category_id is not None and cat.get("id") != category_id:
-                continue
-            for item in cat.get("items", []):
-                if item.get("id") == item_id:
-                    if "answer" in body:
-                        item["answer"] = body["answer"]
-                    if "finding" in body:
-                        item["finding"] = body["finding"]
-                    if "action_item" in body:
-                        item["action_item"] = body["action_item"]
-                    if "responsible" in body:
-                        item["responsible"] = body["responsible"]
-                    if "due_date" in body:
-                        item["due_date"] = body["due_date"]
-                    if "evidence" in body and isinstance(body["evidence"], list):
-                        existing = item.get("evidence", [])
-                        if not isinstance(existing, list):
-                            existing = []
-                        item["evidence"] = existing + body["evidence"]
-                    item_updated = True
-                    break
-            # Also check sub_sections (recordkeeping/HRA style)
-            if not item_updated:
+        categories = inspection.get("categories", [])
+
+        def _apply_fields(item, include_extra=True):
+            if "answer" in body:
+                item["answer"] = body["answer"]
+            if "finding" in body:
+                item["finding"] = body["finding"]
+            if include_extra:
+                if "action_item" in body:
+                    item["action_item"] = body["action_item"]
+                if "responsible" in body:
+                    item["responsible"] = body["responsible"]
+                if "due_date" in body:
+                    item["due_date"] = body["due_date"]
+                if "evidence" in body and isinstance(body["evidence"], list):
+                    existing = item.get("evidence", [])
+                    if not isinstance(existing, list):
+                        existing = []
+                    item["evidence"] = existing + body["evidence"]
+
+        def _search_categories(cats):
+            for cat in cats:
+                for item in cat.get("items", []):
+                    if _ids_match(item.get("id"), item_id):
+                        _apply_fields(item, include_extra=True)
+                        return True
                 for sub in cat.get("sub_sections", []):
                     for item in sub.get("items", []):
-                        if item.get("id") == item_id:
-                            if "answer" in body:
-                                item["answer"] = body["answer"]
-                            if "finding" in body:
-                                item["finding"] = body["finding"]
-                            item_updated = True
-                            break
-                    if item_updated:
-                        break
-            if item_updated:
-                break
+                        if _ids_match(item.get("id"), item_id):
+                            _apply_fields(item, include_extra=False)
+                            return True
+            return False
+
+        candidate_cats = categories
+        if category_id is not None:
+            matched = [cat for cat in categories if _ids_match(cat.get("id"), category_id)]
+            if not matched:
+                # Frontend sends 1-based categoryIndex+1; accept that as a fallback.
+                idx = _numeric_id(category_id)
+                if idx is not None and 1 <= idx <= len(categories):
+                    matched = [categories[idx - 1]]
+            if matched:
+                candidate_cats = matched
+
+        item_updated = _search_categories(candidate_cats)
+        if not item_updated and category_id is not None:
+            logger.warning(
+                "[AUTOSAVE] category_id=%s did not locate item_id=%s in inspection %s; "
+                "searching all categories",
+                category_id, item_id, inspection_id,
+            )
+            item_updated = _search_categories(categories)
+
+        if not item_updated:
+            logger.warning(
+                "[AUTOSAVE] item_id=%s not found in inspection %s",
+                item_id, inspection_id,
+            )
 
     # Update top-level notes
     if "notes" in body and isinstance(body["notes"], str):
@@ -2267,7 +2380,7 @@ def autosave_inspection(event):
 
     _invalidate_dashboard_cache()
 
-    return build_response(200, {
+    response_body = {
         "saved": True,
         "inspection_id": inspection_id,
         "session_id": session_id,
@@ -2275,7 +2388,13 @@ def autosave_inspection(event):
         "progress": progress,
         "next_item_id": next_item,
         "item_updated": item_updated,
-    })
+    }
+    if item_id is not None and not item_updated:
+        response_body["warning"] = (
+            f"Item '{item_id}' was not found in the inspection; "
+            "no checklist fields were updated."
+        )
+    return build_response(200, response_body)
 
 
 def resume_session(event):
@@ -2302,7 +2421,6 @@ def resume_session(event):
 
     session = convert_decimals(session)
     inspection_id = str(session.get("inspection_id", "") or "").strip()
-    inspection_type = str(session.get("inspection_type", "") or "").strip()
 
     if not inspection_id:
         # Session exists but no inspection yet — return session metadata
@@ -2320,26 +2438,7 @@ def resume_session(event):
             },
         })
 
-    if not inspection_type:
-        # Last-ditch: search all 6 tables for this inspection_id
-        for label, tbl in inspection_tables.items():
-            try:
-                probe = tbl.get_item(Key={"inspection_id": inspection_id}).get("Item")
-                if probe:
-                    inspection_type = {v: k for k, v in INSPECTION_TYPE_TO_LABEL.items()}.get(label, "")
-                    if inspection_type:
-                        try:
-                            session_table.update_item(
-                                Key={"session_id": session_id},
-                                UpdateExpression="SET inspection_type = :it",
-                                ExpressionAttributeValues={":it": inspection_type},
-                            )
-                            logger.info(f"[SESSION] Fallback backfilled inspection_type='{inspection_type}' for session {session_id}")
-                        except Exception as update_err:
-                            logger.warning(f"[SESSION] Failed to backfill inspection_type: {update_err}")
-                        break
-            except Exception:
-                continue
+    inspection_type = _resolve_session_inspection_type(session, session_id, inspection_id)
 
     insp_table = _get_inspection_table(inspection_type)
     if not insp_table:

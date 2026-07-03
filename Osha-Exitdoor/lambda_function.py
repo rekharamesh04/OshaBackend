@@ -732,6 +732,38 @@ def load_inspection_by_any_id(id_value: str):
     return load_inspection_by_session_id(id_value)
 
 
+def _numeric_item_id(item_or_id):
+    """Return int ID for default checklist items, or None for custom string IDs."""
+    raw = item_or_id.get("id", 0) if isinstance(item_or_id, dict) else item_or_id
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _link_session_to_inspection(session_id, inspection_id, inspection_type="exit-door"):
+    """Stamp inspection_id + inspection_type on the shared session row for autosave/resume."""
+    session_id = str(session_id or "").strip()
+    inspection_id = str(inspection_id or "").strip()
+    if not session_id or not inspection_id:
+        return
+    try:
+        sessions_table.update_item(
+            Key={"session_id": session_id},
+            UpdateExpression="SET inspection_id = :iid, inspection_type = :itype, updated_at = :u",
+            ExpressionAttributeValues={
+                ":iid": inspection_id,
+                ":itype": inspection_type,
+                ":u": now_iso(),
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to link session %s to inspection %s (%s)",
+            session_id, inspection_id, inspection_type,
+        )
+
+
 def find_item(inspection, item_id):
     for cat_idx, category in enumerate(inspection.get("categories", [])):
         for item_idx, item in enumerate(category.get("items", [])):
@@ -758,7 +790,7 @@ def get_all_items(inspection):
 def next_unanswered_index(inspection):
     for cat_idx, cat in enumerate(inspection.get("categories", [])):
         for item_idx, item in enumerate(cat.get("items", [])):
-            iid = int(item.get("id", 0))
+            iid = _numeric_item_id(item)
             if iid in SUMMARY_ITEMS:
                 continue
             if not item.get("answer", "").strip() or item.get("blocked_by_wrong_image"):
@@ -779,7 +811,7 @@ def update_summary_items(inspection):
     total_inspected = 0
     total_compliant = 0
     for item in get_all_items(inspection):
-        iid = int(item.get("id", 0))
+        iid = _numeric_item_id(item)
         if iid in SUMMARY_ITEMS:
             continue
         for ev in item.get("evidence", []):
@@ -823,10 +855,10 @@ def merge_categories(existing_cats, incoming_cats):
     lookup = {}
     for cat in existing_cats:
         for item in cat.get("items", []):
-            lookup[int(item.get("id", 0))] = item
+            lookup[str(item.get("id"))] = item
     for cat in incoming_cats:
         for item in cat.get("items", []):
-            iid = int(item.get("id", 0))
+            iid = str(item.get("id"))
             if iid in lookup:
                 lookup[iid] = merge_item_records(lookup[iid], item)
             else:
@@ -834,7 +866,7 @@ def merge_categories(existing_cats, incoming_cats):
     for cat in existing_cats:
         new_items = []
         for item in cat.get("items", []):
-            iid = int(item.get("id", 0))
+            iid = str(item.get("id"))
             new_items.append(lookup.get(iid, item))
         cat["items"] = new_items
     return existing_cats
@@ -1217,9 +1249,11 @@ def create_inspection(event):
             "updated_at":      now_iso(),
         })
         save_inspection(record)
+        linked_session_id = session_id or existing.get("session_id", "")
+        _link_session_to_inspection(linked_session_id, inspection_id)
         return build_response(200, {
             "inspection_id": inspection_id,
-            "session_id":    session_id or existing.get("session_id", ""),
+            "session_id":    linked_session_id,
             "created_at":    existing.get("created_at", now_iso()),
             "updated_at":    record["updated_at"],
             "status":        record["status"],
@@ -1228,15 +1262,6 @@ def create_inspection(event):
 
     if not inspection_id:
         inspection_id = str(uuid.uuid4())
-        if session_id:
-            try:
-                sessions_table.update_item(
-                    Key={"session_id": session_id},
-                    UpdateExpression="SET inspection_id = :iid",
-                    ExpressionAttributeValues={":iid": inspection_id},
-                )
-            except Exception:
-                logger.exception("Failed to persist inspection_id to sessions_table")
 
     created_at = now_iso()
     record = {
@@ -1258,6 +1283,7 @@ def create_inspection(event):
         "updated_at":         created_at,
     }
     save_inspection(record)
+    _link_session_to_inspection(session_id, inspection_id)
     return build_response(201, {
         "inspection_id": inspection_id,
         "session_id":    session_id,
@@ -1549,7 +1575,8 @@ def compute_progress(inspection):
     answered = 0
     for cat in inspection.get("categories", []):
         for item in cat.get("items", []):
-            if int(item.get("id", 0)) in SUMMARY_ITEMS:
+            iid = _numeric_item_id(item)
+            if iid in SUMMARY_ITEMS:
                 continue
             total += 1
             if item.get("answer", "").strip():
@@ -1561,7 +1588,8 @@ def compute_progress(inspection):
 def find_next_unanswered(inspection):
     for cat in inspection.get("categories", []):
         for item in cat.get("items", []):
-            if int(item.get("id", 0)) in SUMMARY_ITEMS:
+            iid = _numeric_item_id(item)
+            if iid in SUMMARY_ITEMS:
                 continue
             if not item.get("answer", "").strip():
                 return item.get("id")
@@ -1868,8 +1896,10 @@ def analyze_item_image(event, _is_async=False):
     if checklist_item is None:
         return build_response(404, {"error": "Checklist item not found"})
 
+    numeric_item_id = _numeric_item_id(item_id)
+
     # Summary items: auto-calculate only
-    if int(item_id) in SUMMARY_ITEMS:
+    if numeric_item_id in SUMMARY_ITEMS:
         update_summary_items(inspection)
         inspection["status"]     = compute_status(inspection)
         inspection["updated_at"] = now_iso()
@@ -1890,7 +1920,7 @@ def analyze_item_image(event, _is_async=False):
         })
 
     # Non-AI items: no image analysis, return guidance
-    if int(item_id) in NON_AI_ITEMS:
+    if numeric_item_id in NON_AI_ITEMS:
         logger.info(f"[NON-AI] item_id={item_id} — requires manual inspection, skipping AI")
         return build_response(200, {
             "inspection_id":  inspection_id,

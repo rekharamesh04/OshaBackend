@@ -22,12 +22,15 @@ Single Lambda function handling API routes:
 
 import copy
 import json
+import logging
 import os
 import uuid
 
 import boto3
 from datetime import datetime, timezone
 from decimal import Decimal
+
+logger = logging.getLogger(__name__)
 
 try:
     from checklist_loader import (
@@ -536,6 +539,23 @@ def create_inspection(event):
 
     # Save to DynamoDB
     table.put_item(Item=item)
+
+    # Stamp shared session so Dashboard autosave can resolve the inspection table.
+    try:
+        sessions_table.update_item(
+            Key={"session_id": session_id},
+            UpdateExpression="SET inspection_id = :iid, inspection_type = :itype, updated_at = :u",
+            ExpressionAttributeValues={
+                ":iid": inspection_id,
+                ":itype": "recordkeeping",
+                ":u": created_at,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to link session %s to inspection %s (recordkeeping)",
+            session_id, inspection_id,
+        )
 
     # Return the generated ID
     return build_response(201, {

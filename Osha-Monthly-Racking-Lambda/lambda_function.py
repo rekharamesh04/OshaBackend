@@ -1611,6 +1611,23 @@ def create_inspection(event):
     # Save to DynamoDB
     save_inspection(item)
 
+    # Stamp shared session so Dashboard autosave can resolve the inspection table.
+    try:
+        sessions_table.update_item(
+            Key={"session_id": session_id},
+            UpdateExpression="SET inspection_id = :iid, inspection_type = :itype, updated_at = :u",
+            ExpressionAttributeValues={
+                ":iid": inspection_id,
+                ":itype": "racking",
+                ":u": created_at,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to link session %s to inspection %s (racking)",
+            session_id, inspection_id,
+        )
+
     # Return the generated ID
     return build_response(201, {
         "inspection_id": inspection_id,
