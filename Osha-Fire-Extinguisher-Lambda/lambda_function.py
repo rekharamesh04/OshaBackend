@@ -135,8 +135,6 @@ _FALLBACK_CHECKLIST = {
                 {"id": 8,  "description": "Extinguishers are fully charged. Pressure gauges show adequate pressure (within green zone) and the gauge glass is intact, clean, and readable.",                                                                                                                                                                                                                                                  "answer": "", "finding": "", "action_item": "", "responsible": "", "due_date": "", "evidence": [], "blocked_by_wrong_image": False},
                 {"id": 9,  "description": "Extinguishers' instructions face outward for visibility and are clean, readable, and not blurry, dusty, folded, peeled, or damaged.",                                                                                                                                                                                                                                                             "answer": "", "finding": "", "action_item": "", "responsible": "", "due_date": "", "evidence": [], "blocked_by_wrong_image": False},
                 {"id": 10, "description": "Extinguisher tags are initialed and dated certifying monthly visual inspection took place. Tags must be attached, legible, clean, and not torn, dusty, dirty, blurry, or missing date/initials. Any extinguisher(s) that did not pass, need to be noted in this inspection and brought to compliance through corrective actions.", "answer": "", "finding": "", "action_item": "", "responsible": "", "due_date": "", "evidence": [], "blocked_by_wrong_image": False},
-                {"id": 11, "description": "Number of extinguishers inspected:",                                                                                                                                                                                                                                                                                                                                                              "answer": "", "finding": "", "action_item": "", "responsible": "", "due_date": "", "evidence": [], "blocked_by_wrong_image": False},
-                {"id": 12, "description": "Number of extinguishers compliant:",                                                                                                                                                                                                                                                                                                                                                              "answer": "", "finding": "", "action_item": "", "responsible": "", "due_date": "", "evidence": [], "blocked_by_wrong_image": False},
             ]
         }
     ],
@@ -1377,8 +1375,6 @@ def next_unanswered_index(inspection):
     for cat_idx, cat in enumerate(inspection.get("categories", [])):
         for item_idx, item in enumerate(cat.get("items", [])):
             iid = _numeric_item_id(item)
-            if iid in (11, 12):
-                continue
             if not item.get("answer", "").strip() or item.get("blocked_by_wrong_image"):
                 return cat_idx, item_idx
     return None
@@ -1419,25 +1415,11 @@ def update_summary_items(inspection):
     total_compliant = 0
     for item in get_all_items(inspection):
         iid = _numeric_item_id(item)
-        if iid in (11, 12):
-            continue
         for ev in item.get("evidence", []):
             if isinstance(ev, dict) and ev.get("is_extinguisher"):
                 total_inspected += 1
                 if ev.get("is_compliant"):
                     total_compliant += 1
-
-    item11, c11, i11 = find_item(inspection, "11")
-    if item11 is not None:
-        item11["answer"] = str(total_inspected)
-        item11["finding"] = "Auto-calculated from inspected extinguisher images."
-        inspection["categories"][c11]["items"][i11] = item11
-
-    item12, c12, i12 = find_item(inspection, "12")
-    if item12 is not None:
-        item12["answer"] = str(total_compliant)
-        item12["finding"] = "Auto-calculated from compliant extinguisher images."
-        inspection["categories"][c12]["items"][i12] = item12
 
 
 def merge_item_records(existing, incoming):
@@ -2740,8 +2722,6 @@ def update_checklist_item(event):
     # FIX 3a: Guard against manually updating auto-calculated items 11 and 12.
     # These are always computed from evidence records; manual writes would corrupt counts.
     # ─────────────────────────────────────────────
-    if str(item_id) in ["11", "12"]:
-        return build_response(400, {"error": "Items 11 and 12 are auto-calculated from inspection evidence and cannot be updated manually"})
 
     inspection = load_inspection_by_any_id(inspection_id)
     if not inspection:
@@ -3188,23 +3168,17 @@ def analyze_item_image(event, _is_async=False):
     checklist_item, cat_idx, item_idx = find_item(inspection, item_id)
     if checklist_item is None:
         return build_response(404, {"error": "Checklist item not found"})
-
-    # Items 11 and 12 are auto-calculated — no image needed
     if str(item_id) in ["11", "12"]:
         update_summary_items(inspection)
         inspection["status"]     = compute_status(inspection)
         inspection["updated_at"] = now_iso()
         save_inspection(inspection)
-        item11, _, _ = find_item(inspection, "11")
-        item12, _, _ = find_item(inspection, "12")
         return build_response(200, {
             "inspection_id":      inspection_id,
             "item_id":            item_id,
             "blocked":            False,
             "move_next":          True,
             "message":            "Summary auto-calculated from inspection evidence.",
-            "updated_item_11":    item11,
-            "updated_item_12":    item12,
             "inspection_status":  inspection["status"],
             "current_item_index": inspection.get("current_item_index", 0),
             "inspection":         inspection,
@@ -3561,9 +3535,6 @@ def analyze_item_image(event, _is_async=False):
         inspection["updated_at"] = now_iso()
         save_inspection(inspection)
 
-        item11, _, _ = find_item(inspection, "11")
-        item12, _, _ = find_item(inspection, "12")
-
         return build_response(200, {
             "inspection_id":      inspection_id,
             "item_id":            item_id,
@@ -3577,8 +3548,6 @@ def analyze_item_image(event, _is_async=False):
             "reason":             pass_finding,
             "suggested_action":   "No corrective action required.",
             "updated_item":       checklist_item,
-            "summary_item_11":    item11,
-            "summary_item_12":    item12,
             "inspection_status":  inspection["status"],
             "current_item_index": inspection.get("current_item_index", 0),
             "next_item_index":    inspection.get("current_item_index", 0),
@@ -4025,9 +3994,6 @@ def analyze_item_image(event, _is_async=False):
     inspection["updated_at"] = now_iso()
     save_inspection(inspection)
 
-    item11, _, _ = find_item(inspection, "11")
-    item12, _, _ = find_item(inspection, "12")
-
     # Resolve company-level verdict label for non-pass results
     _verdict_label_final = None
     _verdict_display = "Pass" if passed else "Fail"
@@ -4048,8 +4014,6 @@ def analyze_item_image(event, _is_async=False):
         "reason":             finding_text,
         "suggested_action":   action_text,
         "updated_item":       checklist_item,
-        "summary_item_11":    item11,
-        "summary_item_12":    item12,
         "inspection_status":  inspection["status"],
         "current_item_index": inspection.get("current_item_index", 0),
         "next_item_index":    inspection.get("current_item_index", 0),
@@ -4077,8 +4041,6 @@ def compute_progress(inspection):
     for cat in inspection.get("categories", []):
         for item in cat.get("items", []):
             iid = _numeric_item_id(item)
-            if iid in (11, 12):
-                continue
             total += 1
             if item.get("answer", "").strip():
                 answered += 1
@@ -4091,8 +4053,6 @@ def find_next_unanswered(inspection):
     for cat in inspection.get("categories", []):
         for item in cat.get("items", []):
             iid = _numeric_item_id(item)
-            if iid in (11, 12):
-                continue
             if not item.get("answer", "").strip():
                 return item.get("id")
     return None

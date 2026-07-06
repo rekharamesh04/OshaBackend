@@ -137,7 +137,7 @@ ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 AI_ANALYZABLE_ITEMS = {1, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17}
 NON_AI_ITEMS        = {2, 4, 5, 16}        # require physical test / cert check
-SUMMARY_ITEMS       = {18, 19}              # auto-calculated
+SUMMARY_ITEMS = set()              # auto-calculated
 
 # ─────────────────────────────────────────────
 # Checklist Definition — Single Source of Truth (19 items)
@@ -228,8 +228,6 @@ EXIT_DOOR_CHECKLIST = {
             "id": 5,
             "name": "Summary",
             "items": [
-                _item(18, "Number of exit doors inspected:", False),
-                _item(19, "Number of exit doors compliant:", False),
             ]
         }
     ],
@@ -820,18 +818,6 @@ def update_summary_items(inspection):
                 if ev.get("is_compliant"):
                     total_compliant += 1
 
-    item18, c18, i18 = find_item(inspection, "18")
-    if item18 is not None:
-        item18["answer"] = str(total_inspected)
-        item18["finding"] = "Auto-calculated from inspected exit door images."
-        inspection["categories"][c18]["items"][i18] = item18
-
-    item19, c19, i19 = find_item(inspection, "19")
-    if item19 is not None:
-        item19["answer"] = str(total_compliant)
-        item19["finding"] = "Auto-calculated from compliant exit door images."
-        inspection["categories"][c19]["items"][i19] = item19
-
 
 def merge_item_records(existing, incoming):
     merged = dict(existing)
@@ -1409,8 +1395,6 @@ def update_checklist_item(event):
 
     if not inspection_id or not item_id:
         return build_response(400, {"error": "inspection_id and item_id are required"})
-    if str(item_id) in ["18", "19"]:
-        return build_response(400, {"error": "Items 18 and 19 are auto-calculated and cannot be updated manually"})
 
     inspection = load_inspection_by_any_id(inspection_id)
     if not inspection:
@@ -1904,16 +1888,12 @@ def analyze_item_image(event, _is_async=False):
         inspection["status"]     = compute_status(inspection)
         inspection["updated_at"] = now_iso()
         save_inspection(inspection)
-        item18, _, _ = find_item(inspection, "18")
-        item19, _, _ = find_item(inspection, "19")
         return build_response(200, {
             "inspection_id":     inspection_id,
             "item_id":           item_id,
             "blocked":           False,
             "move_next":         True,
             "message":           "Summary auto-calculated from inspection evidence.",
-            "updated_item_18":   item18,
-            "updated_item_19":   item19,
             "inspection_status": inspection["status"],
             "inspection":        inspection,
             "categories":        inspection.get("categories", []),
@@ -2074,9 +2054,6 @@ def analyze_item_image(event, _is_async=False):
     inspection["updated_at"] = now_iso()
     save_inspection(inspection)
 
-    item18, _, _ = find_item(inspection, "18")
-    item19, _, _ = find_item(inspection, "19")
-
     # Resolve company-level verdict label for non-pass results
     _verdict_label_final = None
     _verdict_display = "Pass" if passed else "Fail"
@@ -2098,8 +2075,6 @@ def analyze_item_image(event, _is_async=False):
         "reason":             finding_text,
         "suggested_action":   action_text,
         "updated_item":       checklist_item,
-        "summary_item_18":    item18,
-        "summary_item_19":    item19,
         "inspection_status":  inspection["status"],
         "current_item_index": inspection.get("current_item_index", 0),
         "next_item_index":    inspection.get("current_item_index", 0),
