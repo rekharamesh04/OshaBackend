@@ -1,0 +1,5169 @@
+{
+  "info": {
+    "_postman_id": "osha-safety-hub-api-collection-v2",
+    "name": "OSHA Safety Hub API",
+    "description": "OSHA Safety Hub backend.\n\n**Start here:** NEW Features \u2014 Custom Checklist\n\n**Variables:** base_url, api_key, company_key, custom_item_id, inspection_id\n\n**base_url:** https://1nm4udlaif.execute-api.ap-south-1.amazonaws.com/dev",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "value",
+        "value": "{{api_key}}",
+        "type": "string"
+      },
+      {
+        "key": "key",
+        "value": "x-api-key",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://1nm4udlaif.execute-api.ap-south-1.amazonaws.com/dev"
+    },
+    {
+      "key": "api_key",
+      "value": "YOUR_API_KEY_HERE"
+    },
+    {
+      "key": "company_key",
+      "value": "cigroupusa"
+    },
+    {
+      "key": "checklist_type",
+      "value": "fire-extinguisher"
+    },
+    {
+      "key": "inspection_id",
+      "value": ""
+    },
+    {
+      "key": "session_id",
+      "value": ""
+    },
+    {
+      "key": "item_id",
+      "value": "1"
+    },
+    {
+      "key": "custom_item_id",
+      "value": ""
+    },
+    {
+      "key": "job_id",
+      "value": ""
+    },
+    {
+      "key": "reseller_key",
+      "value": ""
+    },
+    {
+      "key": "location_key",
+      "value": ""
+    },
+    {
+      "key": "station_id",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "NEW Features \u2014 Custom Checklist",
+      "description": "Test new custom checklist APIs here first. Then use Web/Mobile folders for full coverage.",
+      "item": [
+        {
+          "name": "00 \u2014 Quick Setup",
+          "description": "",
+          "item": [
+            {
+              "name": "Health Check \u2014 List Templates",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/checklist-templates?company_key={{company_key}}",
+                "description": "Confirms base_url and api_key are correct. Expect 200."
+              }
+            },
+            {
+              "name": "Variables Reference",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/checklist-template/{{checklist_type}}?company_key={{company_key}}",
+                "description": "Collection variables to set before testing:\n- api_key\n- company_key\n- checklist_type\n- custom_item_id (from Add Custom Item response)\n- inspection_id / session_id (for mobile evidence tests)"
+              }
+            }
+          ]
+        },
+        {
+          "name": "01 \u2014 Custom Question CRUD",
+          "description": "Run steps 1\u21927 in order for each checklist type. Works for ALL types.",
+          "item": [
+            {
+              "name": "Fire Extinguisher",
+              "description": "",
+              "item": [
+                {
+                  "name": "1. Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher/custom-item",
+                    "description": "Save `id` from response into `custom_item_id` variable.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom Fire Extinguisher test question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "2. Get Admin Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher?company_key={{company_key}}",
+                    "description": "Custom item should appear with is_enabled=true and is_custom=true."
+                  }
+                },
+                {
+                  "name": "3. Get Mobile Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher-inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should appear in the correct category."
+                  }
+                },
+                {
+                  "name": "4. Toggle Custom OFF",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "5. Get Mobile Checklist (hidden)",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher-inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should NOT appear."
+                  }
+                },
+                {
+                  "name": "6. Toggle Custom ON",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "7. Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": "Removes custom item from overlay."
+                  }
+                }
+              ]
+            },
+            {
+              "name": "EyeWash",
+              "description": "",
+              "item": [
+                {
+                  "name": "1. Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash/custom-item",
+                    "description": "Save `id` from response into `custom_item_id` variable.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom EyeWash test question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "2. Get Admin Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash?company_key={{company_key}}",
+                    "description": "Custom item should appear with is_enabled=true and is_custom=true."
+                  }
+                },
+                {
+                  "name": "3. Get Mobile Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash-inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should appear in the correct category."
+                  }
+                },
+                {
+                  "name": "4. Toggle Custom OFF",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "5. Get Mobile Checklist (hidden)",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash-inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should NOT appear."
+                  }
+                },
+                {
+                  "name": "6. Toggle Custom ON",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "7. Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": "Removes custom item from overlay."
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Exit Door",
+              "description": "",
+              "item": [
+                {
+                  "name": "1. Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door/custom-item",
+                    "description": "Save `id` from response into `custom_item_id` variable.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom Exit Door test question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "2. Get Admin Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door?company_key={{company_key}}",
+                    "description": "Custom item should appear with is_enabled=true and is_custom=true."
+                  }
+                },
+                {
+                  "name": "3. Get Mobile Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door-inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should appear in the correct category."
+                  }
+                },
+                {
+                  "name": "4. Toggle Custom OFF",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "5. Get Mobile Checklist (hidden)",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door-inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should NOT appear."
+                  }
+                },
+                {
+                  "name": "6. Toggle Custom ON",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "7. Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": "Removes custom item from overlay."
+                  }
+                }
+              ]
+            },
+            {
+              "name": "HRA",
+              "description": "",
+              "item": [
+                {
+                  "name": "1. Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra/custom-item",
+                    "description": "Save `id` from response into `custom_item_id` variable.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom HRA test question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "2. Get Admin Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra?company_key={{company_key}}",
+                    "description": "Custom item should appear with is_enabled=true and is_custom=true."
+                  }
+                },
+                {
+                  "name": "3. Get Mobile Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/hra-inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should appear in the correct category."
+                  }
+                },
+                {
+                  "name": "4. Toggle Custom OFF",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "5. Get Mobile Checklist (hidden)",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/hra-inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should NOT appear."
+                  }
+                },
+                {
+                  "name": "6. Toggle Custom ON",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "7. Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": "Removes custom item from overlay."
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Racking",
+              "description": "",
+              "item": [
+                {
+                  "name": "1. Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking/custom-item",
+                    "description": "Save `id` from response into `custom_item_id` variable.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom Racking test question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "2. Get Admin Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking?company_key={{company_key}}",
+                    "description": "Custom item should appear with is_enabled=true and is_custom=true."
+                  }
+                },
+                {
+                  "name": "3. Get Mobile Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking-inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should appear in the correct category."
+                  }
+                },
+                {
+                  "name": "4. Toggle Custom OFF",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "5. Get Mobile Checklist (hidden)",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking-inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should NOT appear."
+                  }
+                },
+                {
+                  "name": "6. Toggle Custom ON",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "7. Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": "Removes custom item from overlay."
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Recordkeeping",
+              "description": "",
+              "item": [
+                {
+                  "name": "1. Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping/custom-item",
+                    "description": "Save `id` from response into `custom_item_id` variable.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom Recordkeeping test question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "2. Get Admin Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping?company_key={{company_key}}",
+                    "description": "Custom item should appear with is_enabled=true and is_custom=true."
+                  }
+                },
+                {
+                  "name": "3. Get Mobile Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should appear in the correct category."
+                  }
+                },
+                {
+                  "name": "4. Toggle Custom OFF",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "5. Get Mobile Checklist (hidden)",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/inspection/checklist?company_key={{company_key}}",
+                    "description": "Custom item should NOT appear."
+                  }
+                },
+                {
+                  "name": "6. Toggle Custom ON",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "7. Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": "Removes custom item from overlay."
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "02 \u2014 Default Item Toggle",
+          "description": "Verifies disabled default items are filtered from mobile checklist.",
+          "item": [
+            {
+              "name": "Toggle Default Item OFF",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/checklist-template/{{checklist_type}}/toggle-item",
+                "description": "Set checklist_type variable first (e.g. fire-extinguisher).",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": 1,\n  \"enabled\": false\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "Get Mobile Checklist (item hidden)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/fire-extinguisher-inspection/checklist?company_key={{company_key}}",
+                "description": "Change URL path to match checklist_type if not fire-extinguisher."
+              }
+            },
+            {
+              "name": "Toggle Default Item ON",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/checklist-template/{{checklist_type}}/toggle-item",
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": 1,\n  \"enabled\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "Get Mobile Checklist (item visible)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/fire-extinguisher-inspection/checklist?company_key={{company_key}}",
+                "description": ""
+              }
+            }
+          ]
+        },
+        {
+          "name": "03 \u2014 Custom Question Evidence",
+          "description": "",
+          "item": [
+            {
+              "name": "Get Evidence Upload URL",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/evidence/upload-url?filename=custom_evidence.jpg&contentType=image/jpeg&inspectionType={{checklist_type}}",
+                "description": "Upload file to returned URL, then use file_key in PATCH/analyze."
+              }
+            },
+            {
+              "name": "PATCH Custom Item \u2014 Fire Extinguisher",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/fire-extinguisher/session/{{inspection_id}}/items/{{custom_item_id}}",
+                "description": "Requires inspection_id and custom_item_id. Path: /fire-extinguisher/session/{{inspection_id}}/items/{{custom_item_id}}",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"answer\": \"Yes\",\n  \"finding\": \"Custom item verified\",\n  \"action_item\": \"\",\n  \"evidence\": [\n    {\n      \"file_key\": \"evidence/{{checklist_type}}/sample.jpg\",\n      \"analyzed_at\": \"\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "PATCH Custom Item \u2014 EyeWash",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/eyewash/session/{{inspection_id}}/items/{{custom_item_id}}",
+                "description": "Requires inspection_id and custom_item_id. Path: /eyewash/session/{{inspection_id}}/items/{{custom_item_id}}",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"answer\": \"Yes\",\n  \"finding\": \"Custom item verified\",\n  \"action_item\": \"\",\n  \"evidence\": [\n    {\n      \"file_key\": \"evidence/{{checklist_type}}/sample.jpg\",\n      \"analyzed_at\": \"\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "PATCH Custom Item \u2014 Exit Door",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/exit-door/session/{{inspection_id}}/items/{{custom_item_id}}",
+                "description": "Requires inspection_id and custom_item_id. Path: /exit-door/session/{{inspection_id}}/items/{{custom_item_id}}",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"answer\": \"Yes\",\n  \"finding\": \"Custom item verified\",\n  \"action_item\": \"\",\n  \"evidence\": [\n    {\n      \"file_key\": \"evidence/{{checklist_type}}/sample.jpg\",\n      \"analyzed_at\": \"\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "PATCH Custom Item \u2014 Racking",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/racking/session/{{inspection_id}}/items/{{custom_item_id}}",
+                "description": "Requires inspection_id and custom_item_id. Path: /racking/session/{{inspection_id}}/items/{{custom_item_id}}",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"answer\": \"Yes\",\n  \"finding\": \"Custom item verified\",\n  \"action_item\": \"\",\n  \"evidence\": [\n    {\n      \"file_key\": \"evidence/{{checklist_type}}/sample.jpg\",\n      \"analyzed_at\": \"\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "Analyze Custom Item \u2014 Fire Extinguisher",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/fire-extinguisher/analyze",
+                "description": "AI analysis using item description for custom questions.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"file_key\": \"evidence/{{checklist_type}}/sample.jpg\",\n  \"company_key\": \"{{company_key}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "Analyze Custom Item \u2014 EyeWash",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/eyewash/analyze",
+                "description": "AI analysis using item description for custom questions.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"file_key\": \"evidence/{{checklist_type}}/sample.jpg\",\n  \"company_key\": \"{{company_key}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "Analyze Custom Item \u2014 Exit Door",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/exit-door/analyze",
+                "description": "AI analysis using item description for custom questions.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"file_key\": \"evidence/{{checklist_type}}/sample.jpg\",\n  \"company_key\": \"{{company_key}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "Analyze Custom Item \u2014 Racking",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/racking/analyze",
+                "description": "AI analysis using item description for custom questions.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"file_key\": \"evidence/{{checklist_type}}/sample.jpg\",\n  \"company_key\": \"{{company_key}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "04 \u2014 Inspection Sync (Resume Bug)",
+          "description": "Tests resume flow: disabled/custom items sync into stored inspections.",
+          "item": [
+            {
+              "name": "Get Inspection with company_key \u2014 Fire Extinguisher",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/fire-extinguisher-inspection/{{inspection_id}}?company_key={{company_key}}",
+                "description": "Syncs stored inspection with latest template overlay."
+              }
+            },
+            {
+              "name": "Get Inspection with company_key \u2014 EyeWash",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/eyewash-inspection/{{inspection_id}}?company_key={{company_key}}",
+                "description": ""
+              }
+            },
+            {
+              "name": "Get Inspection with company_key \u2014 Exit Door",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/exit-door-inspection/{{inspection_id}}?company_key={{company_key}}",
+                "description": ""
+              }
+            },
+            {
+              "name": "Get Inspection with company_key \u2014 HRA",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/hra-inspection/{{inspection_id}}?company_key={{company_key}}",
+                "description": ""
+              }
+            },
+            {
+              "name": "Get Inspection with company_key \u2014 Racking",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/racking-inspection/{{inspection_id}}?company_key={{company_key}}",
+                "description": ""
+              }
+            },
+            {
+              "name": "Get Inspection with company_key \u2014 Recordkeeping",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/inspection/{{inspection_id}}?company_key={{company_key}}",
+                "description": ""
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Web Dashboard",
+      "description": "",
+      "item": [
+        {
+          "name": "Organization",
+          "description": "",
+          "item": [
+            {
+              "name": "Resellers",
+              "description": "",
+              "item": [
+                {
+                  "name": "List Resellers",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/resellers",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Create Reseller",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/resellers",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"name\": \"Test Reseller\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Update Reseller",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/resellers/{{reseller_key}}",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"name\": \"Updated Reseller\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Delete Reseller",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/resellers/{{reseller_key}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Companies & Locations",
+              "description": "",
+              "item": [
+                {
+                  "name": "List Companies",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/companies",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Create Company",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/companies",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"name\": \"Test Company\",\n  \"company_key\": \"{{company_key}}\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Update Company",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/companies/{{company_key}}",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"name\": \"Updated Company\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Delete Company",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/companies/{{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Create Location",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/companies/{{company_key}}/locations",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"name\": \"Main Plant\",\n  \"location_key\": \"{{location_key}}\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Update Location",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/companies/{{company_key}}/locations/{{location_key}}",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"name\": \"Updated Location\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Get Location Inspection Categories",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/companies/{{company_key}}/locations/{{location_key}}/inspection-categories",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Toggle Category OFF",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/companies/{{company_key}}/locations/{{location_key}}/toggle-category",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"category_key\": \"eyewash\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Toggle Category ON",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/companies/{{company_key}}/locations/{{location_key}}/toggle-category",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"category_key\": \"eyewash\",\n  \"enabled\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Delete Location",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/companies/{{company_key}}/locations/{{location_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Create Station",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/companies/{{company_key}}/locations/{{location_key}}/stations",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"station_type\": \"fire-extinguisher\",\n  \"name\": \"FE Station 1\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Update Station",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/stations/{{station_id}}",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"status\": \"ok\",\n  \"notes\": \"\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Delete Station",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/api/stations/{{station_id}}",
+                    "description": ""
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Alerts & Admin Inspections",
+          "description": "",
+          "item": [
+            {
+              "name": "Get Alerts",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/api/alerts",
+                "description": ""
+              }
+            },
+            {
+              "name": "Admin List Inspections",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/api/inspections?company_key={{company_key}}",
+                "description": ""
+              }
+            }
+          ]
+        },
+        {
+          "name": "Checklist Template Admin",
+          "description": "",
+          "item": [
+            {
+              "name": "Global",
+              "description": "",
+              "item": [
+                {
+                  "name": "List All Templates",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-templates?company_key={{company_key}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Fire Extinguisher",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Merged Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Raw Overlay",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher/config?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Toggle Default Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": 1,\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Toggle Custom Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher/custom-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom Fire Extinguisher question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Company Overlay",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/fire-extinguisher?company_key={{company_key}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "EyeWash",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Merged Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Raw Overlay",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash/config?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Toggle Default Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": 1,\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Toggle Custom Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash/custom-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom EyeWash question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Company Overlay",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/eyewash?company_key={{company_key}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Exit Door",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Merged Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Raw Overlay",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door/config?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Toggle Default Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": 1,\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Toggle Custom Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door/custom-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom Exit Door question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Company Overlay",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/exit-door?company_key={{company_key}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "HRA",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Merged Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Raw Overlay",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra/config?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Toggle Default Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": 1,\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Toggle Custom Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra/custom-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom HRA question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Company Overlay",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/hra?company_key={{company_key}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Racking",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Merged Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Raw Overlay",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking/config?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Toggle Default Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": 1,\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Toggle Custom Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking/custom-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom Racking question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Company Overlay",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/racking?company_key={{company_key}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Recordkeeping",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Merged Template",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Raw Overlay",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping/config?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Toggle Default Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": 1,\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Toggle Custom Item",
+                  "request": {
+                    "method": "PUT",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping/toggle-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"item_id\": \"{{custom_item_id}}\",\n  \"enabled\": false\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Add Custom Item",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping/custom-item",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"company_key\": \"{{company_key}}\",\n  \"category_id\": 1,\n  \"description\": \"Custom Recordkeeping question\",\n  \"requires_evidence\": true\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Delete Custom Item",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping/custom-item/{custom_item_id}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Company Overlay",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/checklist-template/recordkeeping?company_key={{company_key}}",
+                    "description": ""
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Company Config",
+          "description": "",
+          "item": [
+            {
+              "name": "Get Company Config",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/company-config/{{company_key}}",
+                "description": ""
+              }
+            },
+            {
+              "name": "Put Company Config",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/company-config/{{company_key}}",
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"blocked_verdict_label\": \"need_review\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Mobile App",
+      "description": "",
+      "item": [
+        {
+          "name": "Shared",
+          "description": "",
+          "item": [
+            {
+              "name": "Create Session",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/inspection-session",
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"auditor_name\": \"Test Auditor\",\n  \"facility_area\": \"Warehouse A\",\n  \"date_of_audit\": \"2026-07-01\",\n  \"location\": \"Main Plant\",\n  \"station\": \"Station 1\",\n  \"station_id\": \"{{station_id}}\",\n  \"company_key\": \"{{company_key}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "Get Evidence Upload URL",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/evidence/upload-url?filename=photo.jpg&contentType=image/jpeg&inspectionType=fire-extinguisher",
+                "description": ""
+              }
+            },
+            {
+              "name": "Get Evidence Download URL",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/evidence/download-url?file_key=evidence/fire-extinguisher/2026-07-01/sample_photo.jpg",
+                "description": ""
+              }
+            },
+            {
+              "name": "Mobile Inspection Status",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "x-api-key",
+                    "value": "{{api_key}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": "{{base_url}}/api/mobile/inspection-status?company_key={{company_key}}&location_key={{location_key}}",
+                "description": ""
+              }
+            }
+          ]
+        },
+        {
+          "name": "Fire Extinguisher",
+          "description": "",
+          "item": [
+            {
+              "name": "Checklist & Inspection",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher-inspection/checklist?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Create Inspection",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher-inspection",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"session_id\": \"{{session_id}}\",\n  \"categories\": [],\n  \"general_results\": [],\n  \"notes\": \"\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "List Inspections",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher-inspections",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Inspection",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher-inspection/{{inspection_id}}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Inspection",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher-inspection/{{inspection_id}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Session & Items",
+              "description": "",
+              "item": [
+                {
+                  "name": "Update Item",
+                  "request": {
+                    "method": "PATCH",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher/session/{{inspection_id}}/items/{{item_id}}",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"answer\": \"Yes\",\n  \"finding\": \"\",\n  \"action_item\": \"\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Add Item Note",
+                  "request": {
+                    "method": "PATCH",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher/session/{{inspection_id}}/items/{{item_id}}/note",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"note\": \"Test note\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Get Report",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher/session/{{inspection_id}}/report",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Pause Session",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher/session/{{session_id}}/pause",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Resume Session",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher/session/{{session_id}}/resume",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Session",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher/session/{{session_id}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "AI & Voice",
+              "description": "",
+              "item": [
+                {
+                  "name": "Analyze Image",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher/analyze",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"item_id\": \"{{item_id}}\",\n  \"file_key\": \"evidence/fire-extinguisher/sample.jpg\",\n  \"company_key\": \"{{company_key}}\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Get Analyze Job Status",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher/analyze/status/{{job_id}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Voice Command",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher/voice",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"current_item_id\": \"{{item_id}}\",\n  \"transcript\": \"next\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Generate QR",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/fire-extinguisher/qr/generate",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"station_id\": \"{{station_id}}\",\n  \"height_cm\": 120\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "EyeWash",
+          "description": "",
+          "item": [
+            {
+              "name": "Checklist & Inspection",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash-inspection/checklist?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Create Inspection",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash-inspection",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"session_id\": \"{{session_id}}\",\n  \"categories\": [],\n  \"general_results\": [],\n  \"notes\": \"\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "List Inspections",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash-inspections",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Inspection",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash-inspection/{{inspection_id}}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Inspection",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash-inspection/{{inspection_id}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Completion Readiness",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash-inspection/{{inspection_id}}/completion-readiness",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Session & Items",
+              "description": "",
+              "item": [
+                {
+                  "name": "Update Item",
+                  "request": {
+                    "method": "PATCH",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash/session/{{inspection_id}}/items/{{item_id}}",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"answer\": \"Yes\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Add Item Note",
+                  "request": {
+                    "method": "PATCH",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash/session/{{inspection_id}}/items/{{item_id}}/note",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"note\": \"Test note\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Confirm Manual Answer",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash-inspection/{{inspection_id}}/items/{{item_id}}/confirm",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"answer\": \"Yes\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Pause Session",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash/session/{{session_id}}/pause",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Resume Session",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash/session/{{session_id}}/resume",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Session",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash/session/{{session_id}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "AI & Voice",
+              "description": "",
+              "item": [
+                {
+                  "name": "Analyze Image",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash/analyze",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"item_id\": \"{{item_id}}\",\n  \"file_key\": \"evidence/eyewash/sample.jpg\",\n  \"company_key\": \"{{company_key}}\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Batch Analyze",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash/analyze-batch",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"items\": []\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Voice Command",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/eyewash/voice",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"current_item_id\": \"{{item_id}}\",\n  \"transcript\": \"next\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Exit Door",
+          "description": "",
+          "item": [
+            {
+              "name": "Checklist & Inspection",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door-inspection/checklist?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Create Inspection",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door-inspection",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"session_id\": \"{{session_id}}\",\n  \"categories\": [],\n  \"general_results\": [],\n  \"notes\": \"\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "List Inspections",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door-inspections",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Inspection",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door-inspection/{{inspection_id}}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Inspection",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door-inspection/{{inspection_id}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Session & Items",
+              "description": "",
+              "item": [
+                {
+                  "name": "Update Item",
+                  "request": {
+                    "method": "PATCH",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door/session/{{inspection_id}}/items/{{item_id}}",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"answer\": \"Yes\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Add Item Note",
+                  "request": {
+                    "method": "PATCH",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door/session/{{inspection_id}}/items/{{item_id}}/note",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"note\": \"Test note\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Get Report",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door/session/{{inspection_id}}/report",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Pause Session",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door/session/{{session_id}}/pause",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Resume Session",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door/session/{{session_id}}/resume",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Session",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door/session/{{session_id}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "AI & Voice",
+              "description": "",
+              "item": [
+                {
+                  "name": "Analyze Image",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door/analyze",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"item_id\": \"{{item_id}}\",\n  \"file_key\": \"evidence/exit-door/sample.jpg\",\n  \"company_key\": \"{{company_key}}\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Batch Analyze",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door/analyze-batch",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"items\": []\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Get Analyze Job Status",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door/analyze/status/{{job_id}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Voice Command",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/exit-door/voice",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"current_item_id\": \"{{item_id}}\",\n  \"transcript\": \"next\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "HRA",
+          "description": "",
+          "item": [
+            {
+              "name": "Checklist & Inspection",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/hra-inspection/checklist?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Create Inspection",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/hra-inspection",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"session_id\": \"{{session_id}}\",\n  \"categories\": [],\n  \"general_results\": [],\n  \"notes\": \"\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "List Inspections",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/hra-inspections",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Inspection",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/hra-inspection/{{inspection_id}}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Inspection",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/hra-inspection/{{inspection_id}}",
+                    "description": ""
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Racking",
+          "description": "",
+          "item": [
+            {
+              "name": "Checklist & Inspection",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking-inspection/checklist?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Create Inspection",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking-inspection",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"session_id\": \"{{session_id}}\",\n  \"categories\": [],\n  \"general_results\": [],\n  \"notes\": \"\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "List Inspections",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking-inspections",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Inspection",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking-inspection/{{inspection_id}}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Inspection",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking-inspection/{{inspection_id}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get AI Enablement",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking/ai-enablement",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Session & Items",
+              "description": "",
+              "item": [
+                {
+                  "name": "Update Item",
+                  "request": {
+                    "method": "PATCH",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking/session/{{inspection_id}}/items/{{item_id}}",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"answer\": \"In compliance\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Add Item Note",
+                  "request": {
+                    "method": "PATCH",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking/session/{{inspection_id}}/items/{{item_id}}/note",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"note\": \"Test note\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Pause Session",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking/session/{{session_id}}/pause",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Resume Session",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking/session/{{session_id}}/resume",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Session",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking/session/{{session_id}}",
+                    "description": ""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "AI & Voice",
+              "description": "",
+              "item": [
+                {
+                  "name": "Analyze Image",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking/analyze",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"item_id\": \"{{item_id}}\",\n  \"file_key\": \"evidence/racking/sample.jpg\",\n  \"company_key\": \"{{company_key}}\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Batch Analyze",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking/analyze-batch",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"items\": []\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "Voice Command",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/racking/voice",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"inspection_id\": \"{{inspection_id}}\",\n  \"current_item_id\": \"{{item_id}}\",\n  \"transcript\": \"next\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Recordkeeping",
+          "description": "",
+          "item": [
+            {
+              "name": "Checklist & Inspection",
+              "description": "",
+              "item": [
+                {
+                  "name": "Get Checklist",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/inspection/checklist?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Create Inspection",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/inspection",
+                    "description": "",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"session_id\": \"{{session_id}}\",\n  \"categories\": [],\n  \"general_results\": [\n    {\n      \"finding\": \"\",\n      \"action_item\": \"\",\n      \"responsible\": \"\",\n      \"due_date\": \"\"\n    }\n  ],\n  \"notes\": \"\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "List Inspections",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/inspections",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Get Inspection",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/inspection/{{inspection_id}}?company_key={{company_key}}",
+                    "description": ""
+                  }
+                },
+                {
+                  "name": "Delete Inspection",
+                  "request": {
+                    "method": "DELETE",
+                    "header": [
+                      {
+                        "key": "x-api-key",
+                        "value": "{{api_key}}",
+                        "type": "text"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json",
+                        "type": "text"
+                      }
+                    ],
+                    "url": "{{base_url}}/inspection/{{inspection_id}}",
+                    "description": ""
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

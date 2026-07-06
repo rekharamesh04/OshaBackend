@@ -17,6 +17,8 @@ Endpoints:
     POST   /api/companies/{ck}/locations/{lk}/stations        → Create station
     PUT    /api/companies/{company_key}                        → Update company name/state
     PUT    /api/companies/{ck}/locations/{lk}                  → Update location details
+    GET    /api/companies/{ck}/locations/{lk}/inspection-categories → List category toggles for location
+    PUT    /api/companies/{ck}/locations/{lk}/toggle-category  → Enable/disable inspection category at location
     PUT    /api/stations/{station_id}                          → Update station status/notes
     DELETE /api/companies/{company_key}                        → Delete company + all locations & stations
     DELETE /api/companies/{ck}/locations/{lk}                  → Delete location + all stations
@@ -117,10 +119,126 @@ STATION_TYPES = [
     {"key": "recordkeeping", "label": "Recordkeeping",      "icon": "fa-folder-open"},
 ]
 
+VALID_CATEGORY_KEYS = {st["key"] for st in STATION_TYPES}
+
+CATEGORY_KEY_TO_CHECKLIST_TYPE = {
+    "fire": "fire-extinguisher",
+    "eyewash": "eyewash",
+    "exitdoor": "exit-door",
+    "racking": "racking",
+    "hra": "hra",
+    "recordkeeping": "recordkeeping",
+}
+
 
 # ═══════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════
+
+def _disabled_categories_from_item(location_item):
+    """Return disabled category keys from a location DynamoDB item."""
+    if not location_item:
+        return set()
+    raw = location_item.get("disabled_categories") or []
+    return {str(x) for x in raw}
+
+
+def _get_location_item(company_key, location_key):
+    """Single get_item for a company location (O(1))."""
+    return dashboard_table.get_item(
+        Key={"PK": f"COMPANY#{company_key}", "SK": f"LOCATION#{location_key}"},
+    ).get("Item")
+
+
+def _get_disabled_categories_set(company_key, location_key):
+    """Load disabled category keys for a location."""
+    item = _get_location_item(company_key, location_key)
+    return _disabled_categories_from_item(item)
+
+
+def _list_inspection_categories(disabled_categories):
+    """Build admin/mobile category list with is_enabled flags."""
+    disabled = disabled_categories or set()
+    return [
+        {
+            "category_key": st["key"],
+            "checklist_type": CATEGORY_KEY_TO_CHECKLIST_TYPE.get(st["key"], st["key"]),
+            "label": st["label"],
+            "is_enabled": st["key"] not in disabled,
+        }
+        for st in STATION_TYPES
+    ]
+
+
+def _resolve_location_item(company_key, location_key):
+    """
+    Resolve location metadata for mobile APIs.
+    Fast path: get_item when company_key is provided.
+    Slow path: filtered scan (backward compat).
+    Returns (item, resolved_company_key) or (None, company_key).
+    """
+    if company_key:
+        item = dashboard_table.get_item(
+            Key={"PK": f"COMPANY#{company_key}", "SK": f"LOCATION#{location_key}"},
+            ProjectionExpression="PK, SK, #n, disabled_categories",
+            ExpressionAttributeNames={"#n": "name"},
+        ).get("Item")
+        return item, company_key
+
+    logger.warning(
+        "[MOBILE] company_key omitted for location '%s' — using slow scan; "
+        "pass company_key for 200-500ms performance target",
+        location_key,
+    )
+    loc_scan_kwargs = {
+        "FilterExpression": Attr("SK").eq(f"LOCATION#{location_key}"),
+        "ProjectionExpression": "PK, SK, #n, disabled_categories",
+        "ExpressionAttributeNames": {"#n": "name"},
+    }
+    loc_resp = dashboard_table.scan(**loc_scan_kwargs)
+    loc_items = loc_resp.get("Items", [])
+    while "LastEvaluatedKey" in loc_resp:
+        loc_scan_kwargs["ExclusiveStartKey"] = loc_resp["LastEvaluatedKey"]
+        loc_resp = dashboard_table.scan(**loc_scan_kwargs)
+        loc_items.extend(loc_resp.get("Items", []))
+
+    for item in loc_items:
+        pk = item.get("PK", "")
+        if pk.startswith("COMPANY#"):
+            return item, pk[8:]
+    return None, ""
+
+
+def _resolve_company_location_from_station(station_id):
+    """Resolve company_key and location_key from a station_id."""
+    station = _find_station_by_id(station_id)
+    location_key = ""
+    company_key = ""
+    if station:
+        pk = str(station.get("PK", ""))
+        if pk.startswith("LOCATION#"):
+            location_key = pk[9:]
+        company_key = str(station.get("company_key", "")).strip()
+    if not location_key:
+        location_key = _extract_location_key_from_station_id(station_id) or ""
+    return company_key, location_key
+
+
+def _category_disabled_response(category_key):
+    return build_response(403, {
+        "error": f"Inspection category '{category_key}' is disabled at this location",
+    })
+
+
+def _check_category_enabled_at_station(station_id, category_key):
+    """Return error response if category disabled at station's location, else None."""
+    company_key, location_key = _resolve_company_location_from_station(station_id)
+    if not company_key or not location_key:
+        return None
+    disabled = _get_disabled_categories_set(company_key, location_key)
+    if category_key in disabled:
+        return _category_disabled_response(category_key)
+    return None
 
 def _normalized_headers(event):
     """Normalize header keys to lowercase for case-insensitive lookup."""
@@ -482,6 +600,7 @@ def get_resellers(event):
                     "state": item.get("state", ""), "address": item.get("address", ""),
                     "city": item.get("city", ""), "zip": item.get("zip", ""),
                     "phone": item.get("phone", ""),
+                    "disabled_categories": list(_disabled_categories_from_item(item)),
                 })
 
         elif pk.startswith("LOCATION#") and sk.startswith("STATION#"):
@@ -503,9 +622,14 @@ def get_resellers(event):
             tk = s.get("typeKey", "")
             if tk in type_buckets:
                 type_buckets[tk].append(s)
-        loc_copy = {k: v for k, v in loc.items()}
+        loc_copy = {k: v for k, v in loc.items() if k != "disabled_categories"}
+        disabled_set = set(loc.get("disabled_categories") or [])
         loc_copy["stationTypes"] = [
-            {"key": st["key"], "label": st["label"], "icon": st["icon"], "stations": type_buckets.get(st["key"], [])}
+            {
+                "key": st["key"], "label": st["label"], "icon": st["icon"],
+                "is_enabled": st["key"] not in disabled_set,
+                "stations": type_buckets.get(st["key"], []),
+            }
             for st in STATION_TYPES
         ]
         return loc_copy
@@ -695,6 +819,7 @@ def get_companies(event):
                     "city": item.get("city", ""),
                     "zip": item.get("zip", ""),
                     "phone": item.get("phone", ""),
+                    "disabled_categories": list(_disabled_categories_from_item(item)),
                 })
 
         elif pk.startswith("LOCATION#") and sk.startswith("STATION#"):
@@ -726,17 +851,20 @@ def get_companies(event):
                 if tk in type_buckets:
                     type_buckets[tk].append(s)
 
+            disabled_set = set(loc.get("disabled_categories") or [])
+
             station_types = [
                 {
                     "key": st["key"],
                     "label": st["label"],
                     "icon": st["icon"],
+                    "is_enabled": st["key"] not in disabled_set,
                     "stations": type_buckets.get(st["key"], []),
                 }
                 for st in STATION_TYPES
             ]
 
-            loc_copy = {k: v for k, v in loc.items()}
+            loc_copy = {k: v for k, v in loc.items() if k != "disabled_categories"}
             loc_copy["stationTypes"] = station_types
             company["locations"].append(loc_copy)
 
@@ -1523,6 +1651,93 @@ def update_location(event):
 
 
 # ═══════════════════════════════════════════════
+# GET /api/companies/{ck}/locations/{lk}/inspection-categories
+# ═══════════════════════════════════════════════
+def get_location_inspection_categories(event):
+    """Returns all inspection categories with is_enabled for a location (admin toggles)."""
+    path_params = event.get("pathParameters") or {}
+    company_key = str(path_params.get("company_key", "")).strip()
+    location_key = str(path_params.get("location_key", "")).strip()
+
+    if not company_key or not location_key:
+        return build_response(400, {"error": "company_key and location_key are required"})
+
+    item = _get_location_item(company_key, location_key)
+    if not item:
+        return build_response(404, {"error": f"Location '{location_key}' not found"})
+
+    disabled = _disabled_categories_from_item(item)
+    return build_response(200, {
+        "company_key": company_key,
+        "location_key": location_key,
+        "disabled_categories": sorted(disabled),
+        "inspection_categories": _list_inspection_categories(disabled),
+    })
+
+
+# ═══════════════════════════════════════════════
+# PUT /api/companies/{ck}/locations/{lk}/toggle-category
+# ═══════════════════════════════════════════════
+def toggle_location_category(event):
+    """
+    Enable or disable an inspection category for a specific location.
+
+    Body: {"category_key": "eyewash", "enabled": false}
+    """
+    path_params = event.get("pathParameters") or {}
+    company_key = str(path_params.get("company_key", "")).strip()
+    location_key = str(path_params.get("location_key", "")).strip()
+    body = parse_body(event)
+
+    if not company_key or not location_key:
+        return build_response(400, {"error": "company_key and location_key are required"})
+
+    category_key = str(body.get("category_key", "")).strip()
+    enabled = body.get("enabled")
+
+    if not category_key:
+        return build_response(400, {"error": "category_key is required"})
+    if category_key not in VALID_CATEGORY_KEYS:
+        return build_response(400, {
+            "error": f"Invalid category_key. Must be one of: {sorted(VALID_CATEGORY_KEYS)}",
+        })
+    if enabled is None or not isinstance(enabled, bool):
+        return build_response(400, {"error": "enabled must be true or false"})
+
+    item = _get_location_item(company_key, location_key)
+    if not item:
+        return build_response(404, {"error": f"Location '{location_key}' not found"})
+
+    disabled = list(_disabled_categories_from_item(item))
+    if enabled:
+        disabled = [x for x in disabled if x != category_key]
+    elif category_key not in disabled:
+        disabled.append(category_key)
+
+    now = now_iso()
+    dashboard_table.update_item(
+        Key={"PK": f"COMPANY#{company_key}", "SK": f"LOCATION#{location_key}"},
+        UpdateExpression="SET disabled_categories = :dc, updated_at = :ua",
+        ExpressionAttributeValues={
+            ":dc": disabled,
+            ":ua": now,
+        },
+    )
+    _invalidate_dashboard_cache()
+
+    disabled_set = set(disabled)
+    action = "enabled" if enabled else "disabled"
+    return build_response(200, {
+        "message": f"Category '{category_key}' {action} for location '{location_key}'",
+        "company_key": company_key,
+        "location_key": location_key,
+        "disabled_categories": sorted(disabled_set),
+        "inspection_categories": _list_inspection_categories(disabled_set),
+        "updated_at": now,
+    })
+
+
+# ═══════════════════════════════════════════════
 # API 10: DELETE /api/companies/{company_key}
 # ═══════════════════════════════════════════════
 def delete_company(event):
@@ -1668,13 +1883,16 @@ def mobile_inspection_status(event):
     Powers the mobile app's "inspection home screen."
 
     Query Parameters:
+        company_key    (recommended) — Enables fast O(1) location lookup
         location_key   (required) — Which location (e.g. "austin-tx")
         category       (optional) — Filter to a single category typeKey
         auditor_name   (optional) — Filter progress to a specific inspector
     """
 
     try:
+        t_start = _time.monotonic()
         params = event.get("queryStringParameters", {}) or {}
+        company_key = str(params.get("company_key", "") or "").strip()
         location_key = str(params.get("location_key", "") or "").strip()
         filter_category = str(params.get("category", "") or "").strip()
         filter_auditor = str(params.get("auditor_name", "") or "").strip()
@@ -1689,50 +1907,41 @@ def mobile_inspection_status(event):
                 "error": f"Invalid category '{filter_category}'. Must be one of: {', '.join(sorted(valid_type_keys))}"
             })
 
-        # ── Step 1: Get all stations under this location from dashboard table ──
-        # OPTIMIZED: Use targeted DynamoDB query instead of full table scan.
-        # Stations live under PK=LOCATION#{lk}, so we query directly.
+        # ── Step 1: Resolve location (fast get_item when company_key provided) ──
+        t_loc = _time.monotonic()
+        location_item, company_key = _resolve_location_item(company_key, location_key)
+        location_ms = int((_time.monotonic() - t_loc) * 1000)
 
-        # 1a. Find the location name — it lives in PK=COMPANY#{ck} / SK=LOCATION#{lk}
-        #     We don't know the company_key, so we use a filtered scan with
-        #     ProjectionExpression to minimize data transfer.
-        location_name = ""
-        location_found = False
-        loc_scan_kwargs = {
-            "FilterExpression": Attr("SK").eq(f"LOCATION#{location_key}"),
-            "ProjectionExpression": "PK, SK, #n",
-            "ExpressionAttributeNames": {"#n": "name"},
-        }
-        loc_resp = dashboard_table.scan(**loc_scan_kwargs)
-        loc_items = loc_resp.get("Items", [])
-        # Handle pagination (unlikely for this small result set, but safe)
-        while "LastEvaluatedKey" in loc_resp:
-            loc_scan_kwargs["ExclusiveStartKey"] = loc_resp["LastEvaluatedKey"]
-            loc_resp = dashboard_table.scan(**loc_scan_kwargs)
-            loc_items.extend(loc_resp.get("Items", []))
-
-        for item in loc_items:
-            if item.get("PK", "").startswith("COMPANY#"):
-                location_name = item.get("name", location_key)
-                location_found = True
-                break
-
-        if not location_found:
+        if not location_item:
             return build_response(404, {"error": f"Location '{location_key}' not found"})
 
+        location_name = location_item.get("name", location_key)
+        disabled_categories = _disabled_categories_from_item(location_item)
+
+        if filter_category and filter_category in disabled_categories:
+            return build_response(403, {
+                "error": f"Category '{filter_category}' is disabled at this location",
+            })
+
         # 1b. Query stations directly by PK — fast DynamoDB query (not a scan)
+        t_st = _time.monotonic()
         station_resp = dashboard_table.query(
             KeyConditionExpression=Key("PK").eq(f"LOCATION#{location_key}"),
+            ProjectionExpression="SK, station_id, #n, typeKey, nextDue, #s, lastInspected",
+            ExpressionAttributeNames={"#n": "name", "#s": "status"},
         )
         station_items = convert_decimals(station_resp.get("Items", []))
+        stations_ms = int((_time.monotonic() - t_st) * 1000)
 
-        # Collect all stations under this location
+        # Collect all stations under this location (skip disabled categories)
         location_stations = []
         for item in station_items:
             sk = item.get("SK", "")
             if not sk.startswith("STATION#"):
                 continue
             type_key = item.get("typeKey", "")
+            if type_key in disabled_categories:
+                continue
             # Apply category filter if specified
             if filter_category and type_key != filter_category:
                 continue
@@ -1819,15 +2028,23 @@ def mobile_inspection_status(event):
                 logger.error(f"[MOBILE] Error scanning {type_label}: {str(e)}")
                 return []
 
-        # Only scan tables for the categories we need
+        # Only query inspection tables for enabled categories
+        enabled_type_keys = [
+            st["key"] for st in STATION_TYPES if st["key"] not in disabled_categories
+        ]
         tables_to_scan = {}
         if filter_category:
-            label = TYPEKEY_TO_INSPECTION_LABEL.get(filter_category)
-            if label and label in inspection_tables:
-                tables_to_scan[label] = inspection_tables[label]
+            if filter_category not in disabled_categories:
+                label = TYPEKEY_TO_INSPECTION_LABEL.get(filter_category)
+                if label and label in inspection_tables:
+                    tables_to_scan[label] = inspection_tables[label]
         else:
-            tables_to_scan = inspection_tables
+            for tk in enabled_type_keys:
+                label = TYPEKEY_TO_INSPECTION_LABEL.get(tk)
+                if label and label in inspection_tables:
+                    tables_to_scan[label] = inspection_tables[label]
 
+        t_insp = _time.monotonic()
         with ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
                 executor.submit(_query_or_scan_inspection_table, label, tbl): label
@@ -1836,6 +2053,7 @@ def mobile_inspection_status(event):
             for future in as_completed(futures):
                 all_inspections.extend(future.result())
 
+        inspections_ms = int((_time.monotonic() - t_insp) * 1000)
         logger.info(f"[MOBILE] Total inspections fetched (this month): {len(all_inspections)}")
 
         # ── Step 3: Build station_id → inspection mapping for this month ──
@@ -2001,6 +2219,9 @@ def mobile_inspection_status(event):
 
         for st_type in STATION_TYPES:
             tk = st_type["key"]
+            # Skip disabled categories for mobile
+            if tk in disabled_categories:
+                continue
             # Skip if category filter is active and this isn't the filtered category
             if filter_category and tk != filter_category:
                 continue
@@ -2037,6 +2258,7 @@ def mobile_inspection_status(event):
         response = {
             "location_key": location_key,
             "location_name": location_name,
+            "company_key": company_key,
             "date": today.strftime("%Y-%m-%d"),
             "summary": {
                 "total": total_all,
@@ -2048,6 +2270,12 @@ def mobile_inspection_status(event):
             },
             "categories": categories_response,
         }
+
+        total_ms = int((_time.monotonic() - t_start) * 1000)
+        logger.info(
+            "[MOBILE] location=%dms stations=%dms inspections=%dms total=%dms enabled_categories=%d",
+            location_ms, stations_ms, inspections_ms, total_ms, len(enabled_type_keys),
+        )
 
         return build_response(200, response)
 
@@ -2088,6 +2316,10 @@ def find_draft(event):
     insp_table = _get_inspection_table_by_category(category)
     if not insp_table:
         return build_response(400, {"error": f"No inspection table for category '{category}'"})
+
+    category_guard = _check_category_enabled_at_station(station_id, category)
+    if category_guard:
+        return category_guard
 
     # Look up sessions for this station_id
     # Try GSI first (StationDraftIndex: PK=station_id, SK=date_of_audit)
@@ -2255,6 +2487,18 @@ def autosave_inspection(event):
     if not session:
         return build_response(404, {"error": f"Session '{session_id}' not found"})
 
+    station_id = str(session.get("station_id", "") or "").strip()
+    if station_id:
+        inspection_type_hint = str(session.get("inspection_type", "") or "").strip()
+        category_hint = body.get("inspection_type") or body.get("category") or body.get("category_key")
+        if not category_hint and inspection_type_hint:
+            type_to_category = {v: k for k, v in CATEGORY_TO_INSPECTION_TYPE.items()}
+            category_hint = type_to_category.get(inspection_type_hint, "")
+        if category_hint:
+            category_guard = _check_category_enabled_at_station(station_id, str(category_hint).strip())
+            if category_guard:
+                return category_guard
+
     inspection_id = str(session.get("inspection_id", "") or "").strip()
     if not inspection_id:
         return build_response(400, {"error": "No inspection linked to this session. Start an inspection first."})
@@ -2421,6 +2665,16 @@ def resume_session(event):
 
     session = convert_decimals(session)
     inspection_id = str(session.get("inspection_id", "") or "").strip()
+
+    station_id = str(session.get("station_id", "") or "").strip()
+    inspection_type_early = str(session.get("inspection_type", "") or "").strip()
+    if station_id and inspection_type_early:
+        type_to_category = {v: k for k, v in CATEGORY_TO_INSPECTION_TYPE.items()}
+        category_key_early = type_to_category.get(inspection_type_early, "")
+        if category_key_early:
+            category_guard = _check_category_enabled_at_station(station_id, category_key_early)
+            if category_guard:
+                return category_guard
 
     if not inspection_id:
         # Session exists but no inspection yet — return session metadata
@@ -2647,6 +2901,20 @@ def lambda_handler(event, context):
         # ── PUT /api/companies/{ck}/locations/{lk} ──
         elif http_method == "PUT" and resource == "/api/companies/{company_key}/locations/{location_key}":
             return update_location(event)
+
+        # ── GET /api/companies/{ck}/locations/{lk}/inspection-categories ──
+        elif http_method == "GET" and (
+            resource == "/api/companies/{company_key}/locations/{location_key}/inspection-categories"
+            or path.rstrip("/").endswith("/inspection-categories")
+        ):
+            return get_location_inspection_categories(event)
+
+        # ── PUT /api/companies/{ck}/locations/{lk}/toggle-category ──
+        elif http_method == "PUT" and (
+            resource == "/api/companies/{company_key}/locations/{location_key}/toggle-category"
+            or path.rstrip("/").endswith("/toggle-category")
+        ):
+            return toggle_location_category(event)
 
         # ── PUT /api/stations/{station_id} ──
         elif http_method == "PUT" and resource == "/api/stations/{station_id}":
