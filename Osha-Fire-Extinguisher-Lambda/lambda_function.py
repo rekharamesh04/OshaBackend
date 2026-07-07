@@ -91,6 +91,23 @@ MIN_MOUNTING_HEIGHT_CM = float(os.getenv("MIN_MOUNTING_HEIGHT_CM", "10"))
 IMAGE_CONFIDENCE_BLOCK_THRESHOLD = 0.35
 COMPONENT_CONFIDENCE_BLOCK_THRESHOLD = float(os.getenv("COMPONENT_CONFIDENCE_BLOCK_THRESHOLD", "0.10"))
 
+# Component close-ups (items 8–10): definitive enforce failures are clear "Fail".
+# Only unclear / retake conditions use the admin blocked verdict (Need Verification / Fail).
+COMPONENT_CLEAR_FAIL_CONDITIONS = frozenset({
+    "nozzle_failed",
+    "no_hose_attached_to_extinguisher",
+    "no_extinguisher_body_visible",
+    "gauge_failed",
+    "label_failed",
+    "tag_front_failed",
+    "tag_back_failed",
+    "wrong_side_captured",
+})
+COMPONENT_RETAKE_CONDITIONS = frozenset({
+    "target_not_visible",
+    "not_visible",
+})
+
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 
 try:
@@ -3880,6 +3897,18 @@ def analyze_item_image(event, _is_async=False):
         low_confidence = confidence < IMAGE_CONFIDENCE_BLOCK_THRESHOLD
 
     blocked = wrong_image or low_confidence
+
+    # Item 10 (and other component close-ups): do not let low confidence override a
+    # definitive enforce_component_checks failure — that swaps Fail vs Need Verification.
+    if component_focus and not passed:
+        cond = str(condition_checked or "").strip().lower()
+        if cond in COMPONENT_CLEAR_FAIL_CONDITIONS:
+            blocked = False
+        elif cond in COMPONENT_RETAKE_CONDITIONS:
+            blocked = True
+        elif low_confidence:
+            blocked = True
+
     zoom_hint = item_zoom_hint(item_id, image_side=image_side)
     blocked_suggested_action = (
         suggested_action or
@@ -3909,7 +3938,12 @@ def analyze_item_image(event, _is_async=False):
             blocked = False
             passed  = False
 
-    # Build and append evidence record
+    _ev_company_key = str(body.get("company_key", "")).strip()
+    _ev_verdict_label, _ev_verdict_display = resolve_verdict_fields(
+        _ev_company_key, passed and not blocked, blocked,
+    )
+
+    # Build and append evidence record (item 10 front/back each get their own verdict)
     evidence_record = {
         "file_key":          body.get("file_key") or body.get("fileKey") or "",
         "analyzed_at":       now_iso(),
@@ -3923,7 +3957,12 @@ def analyze_item_image(event, _is_async=False):
         "worker_message":    worker_message,
         "suggested_action":  suggested_action or "",
         "blocked":           blocked,
+        "verdict_display":   _ev_verdict_display,
     }
+    if str(item_id) == "10" and image_side:
+        evidence_record["image_side"] = image_side
+    if _ev_verdict_label:
+        evidence_record["blocked_verdict_label"] = _ev_verdict_label
     # Attach full analysis to evidence when explicitly requested via env var.
     try:
         if str(os.getenv("DEBUG_CAPTURE_ANALYSIS", "")).strip().lower() in {"1", "true", "yes"}:
@@ -3969,6 +4008,8 @@ def analyze_item_image(event, _is_async=False):
         }
         if _company_key:
             blocked_body["company_key"] = _company_key
+        if str(item_id) == "10" and image_side:
+            blocked_body["image_side"] = image_side
         return build_response(200, blocked_body)
 
     # Record pass/fail answer
@@ -4026,6 +4067,8 @@ def analyze_item_image(event, _is_async=False):
     _ck = str(body.get("company_key", "")).strip()
     if _ck:
         resp_body["company_key"] = _ck
+    if str(item_id) == "10" and image_side:
+        resp_body["image_side"] = image_side
 
     return build_response(200, resp_body)
 

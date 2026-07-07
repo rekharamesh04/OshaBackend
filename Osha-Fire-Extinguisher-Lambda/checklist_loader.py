@@ -430,9 +430,11 @@ def enrich_analyze_response(result, company_key=""):
     passed = bool(enriched.get("pass", False))
     blocked = bool(enriched.get("blocked", False))
     label, display = resolve_verdict_fields(ck, passed, blocked)
-    if label and "blocked_verdict_label" not in enriched:
+    enriched["verdict_display"] = display
+    if label:
         enriched["blocked_verdict_label"] = label
-    enriched.setdefault("verdict_display", display)
+    elif blocked:
+        enriched.pop("blocked_verdict_label", None)
     return enriched
 
 
