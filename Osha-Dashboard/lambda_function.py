@@ -20,6 +20,7 @@ Endpoints:
     GET    /api/companies/{ck}/locations/{lk}/inspection-categories → List category toggles for location
     PUT    /api/companies/{ck}/locations/{lk}/toggle-category  → Enable/disable inspection category at location
     PUT    /api/stations/{station_id}                          → Update station status/notes
+    GET    /api/stations/{station_id}/qr-payload               → Station QR JSON payload for admin printing
     DELETE /api/companies/{company_key}                        → Delete company + all locations & stations
     DELETE /api/companies/{ck}/locations/{lk}                  → Delete location + all stations
     DELETE /api/stations/{station_id}                          → Delete a single station
@@ -129,6 +130,9 @@ CATEGORY_KEY_TO_CHECKLIST_TYPE = {
     "hra": "hra",
     "recordkeeping": "recordkeeping",
 }
+
+STATION_QR_TYPE = "OSHA_STATION"
+STATION_QR_VERSION = 1
 
 
 # ═══════════════════════════════════════════════
@@ -1129,6 +1133,98 @@ def _find_station_by_id(station_id):
         )
         items = resp.get("Items", [])
     return items[0] if items else None
+
+
+def _station_type_label(category_key):
+    """Return display label for a station typeKey."""
+    for st in STATION_TYPES:
+        if st["key"] == category_key:
+            return st["label"]
+    return category_key
+
+
+def _build_station_qr_payload(station_item, company_key, location_key, location_item, company_item):
+    """Build the JSON object encoded in a station identification QR code."""
+    category_key = str(station_item.get("typeKey", "")).strip()
+    station_id = str(station_item.get("station_id", "")).strip()
+    station_name = str(station_item.get("name", "")).strip()
+
+    location_name = str(location_item.get("name", location_key)).strip()
+    location_state = str(location_item.get("state", "")).strip()
+    facility_area = location_name
+    location_display = f"{location_name}, {location_state}" if location_state else location_name
+
+    company_name = str(company_item.get("name", company_key)).strip()
+    category_label = _station_type_label(category_key)
+    inspection_type = CATEGORY_TO_INSPECTION_TYPE.get(category_key, category_key)
+    checklist_type = CATEGORY_KEY_TO_CHECKLIST_TYPE.get(category_key, category_key)
+    category_enabled = category_key not in _disabled_categories_from_item(location_item)
+
+    return {
+        "type": STATION_QR_TYPE,
+        "version": STATION_QR_VERSION,
+        "company_key": company_key,
+        "company_name": company_name,
+        "location_key": location_key,
+        "location_name": location_name,
+        "facility_area": facility_area,
+        "location": location_display,
+        "category_key": category_key,
+        "category_label": category_label,
+        "inspection_type": inspection_type,
+        "checklist_type": checklist_type,
+        "station_id": station_id,
+        "station_name": station_name,
+        "category_enabled": category_enabled,
+        "generated_at": now_iso(),
+    }
+
+
+def get_station_qr_payload(event):
+    """Return QR payload JSON for a single station (admin prints QR from qr_text)."""
+    path_params = event.get("pathParameters") or {}
+    station_id = str(path_params.get("station_id", "") or "").strip()
+    if not station_id:
+        return build_response(400, {"error": "station_id is required in URL path"})
+
+    station_item = _find_station_by_id(station_id)
+    if not station_item:
+        return build_response(404, {"error": f"Station '{station_id}' not found"})
+
+    company_key, location_key = _resolve_company_location_from_station(station_id)
+    if not company_key or not location_key:
+        return build_response(404, {
+            "error": f"Company or location metadata not found for station '{station_id}'",
+        })
+
+    location_item = _get_location_item(company_key, location_key)
+    if not location_item:
+        return build_response(404, {
+            "error": f"Location '{location_key}' not found for station '{station_id}'",
+        })
+
+    company_item = dashboard_table.get_item(
+        Key={"PK": f"COMPANY#{company_key}", "SK": "METADATA"},
+    ).get("Item")
+    if not company_item:
+        return build_response(404, {
+            "error": f"Company '{company_key}' not found for station '{station_id}'",
+        })
+
+    qr_payload = _build_station_qr_payload(
+        convert_decimals(station_item),
+        company_key,
+        location_key,
+        convert_decimals(location_item),
+        convert_decimals(company_item),
+    )
+    qr_text = json.dumps(qr_payload, separators=(",", ":"), default=str)
+
+    return build_response(200, {
+        "station_id": station_id,
+        "qr_payload": qr_payload,
+        "qr_text": qr_text,
+    })
 
 
 def update_station(event):
@@ -2508,6 +2604,13 @@ def lambda_handler(event, context):
         # ── PUT /api/stations/{station_id} ──
         elif http_method == "PUT" and resource == "/api/stations/{station_id}":
             return update_station(event)
+
+        # ── GET /api/stations/{station_id}/qr-payload ──
+        elif http_method == "GET" and (
+            resource == "/api/stations/{station_id}/qr-payload"
+            or ("/api/stations/" in path and path.rstrip("/").endswith("/qr-payload"))
+        ):
+            return get_station_qr_payload(event)
 
         # ── DELETE /api/companies/{company_key} ──
         elif http_method == "DELETE" and resource == "/api/companies/{company_key}":
