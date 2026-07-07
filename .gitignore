@@ -2,16 +2,10 @@
 .env
 .env.*
 !.env.example
-scripts/aws-migration/config.yaml
-scripts/aws-migration/artifacts/
 
-# Local reference only (not deployed to AWS)
-postman/
-scripts/
-
-# Cursor local config
+# Local workspace (not part of the deployed application)
+local docs/
 .cursor/
-.cursorrules
 
 # Logs
 *.log
