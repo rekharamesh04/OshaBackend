@@ -5,6 +5,14 @@
 scripts/aws-migration/config.yaml
 scripts/aws-migration/artifacts/
 
+# Local reference only (not deployed to AWS)
+postman/
+scripts/
+
+# Cursor local config
+.cursor/
+.cursorrules
+
 # Logs
 *.log
 
