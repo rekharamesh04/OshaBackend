@@ -107,6 +107,19 @@ COMPONENT_RETAKE_CONDITIONS = frozenset({
     "target_not_visible",
     "not_visible",
 })
+# Item 2 (QR height): definitive failures must show Fail; unclear photo cases
+# use the admin blocked verdict (Need Verification / Fail). Do not leave
+# clear Fail outcomes as blocked=True — that swaps labels like item 10.
+ITEM2_CLEAR_FAIL_CONDITIONS = frozenset({
+    "height_exceeds_osha_limit",
+    "qr_data_invalid",
+    "qr_height_implausible",
+})
+ITEM2_RETAKE_CONDITIONS = frozenset({
+    "qr_not_detected",
+    "extinguisher_not_in_frame",
+    "ai_error",
+})
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 
@@ -3321,7 +3334,22 @@ def analyze_item_image(event, _is_async=False):
     if str(item_id) == "2":
         logger.info("[ITEM2] Frontend-decoded QR flow")
 
-        def _item2_fail(finding, action, message, obj_det, cond, blocked=True):
+        def _item2_resolve_blocked(cond, blocked_override=None):
+            """Map item-2 condition to blocked so Fail vs Need Verification do not swap."""
+            if blocked_override is not None:
+                return bool(blocked_override)
+            cond_key = str(cond or "").strip().lower()
+            if cond_key in ITEM2_CLEAR_FAIL_CONDITIONS:
+                return False
+            if cond_key in ITEM2_RETAKE_CONDITIONS:
+                return True
+            # Unknown conditions: treat as retake/unclear (safer than silent Fail)
+            return True
+
+        def _item2_fail(finding, action, message, obj_det, cond, blocked=None):
+            blocked = _item2_resolve_blocked(cond, blocked)
+            _ck = str(body.get("company_key", "")).strip()
+            _verdict_label, _verdict_display = resolve_verdict_fields(_ck, False, blocked)
             ev = {
                 "file_key":          body.get("file_key") or body.get("fileKey") or "",
                 "analyzed_at":       now_iso(),
@@ -3335,8 +3363,11 @@ def analyze_item_image(event, _is_async=False):
                 "worker_message":    message,
                 "suggested_action":  action,
                 "blocked":           blocked,
+                "verdict_display":   _verdict_display,
                 "inference_source":  "frontend_qr_decode",
             }
+            if _verdict_label:
+                ev["blocked_verdict_label"] = _verdict_label
             checklist_item.setdefault("evidence", [])
             checklist_item["evidence"].append(ev)
             checklist_item["blocked_by_wrong_image"] = blocked
@@ -3346,8 +3377,6 @@ def analyze_item_image(event, _is_async=False):
             inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
             inspection["updated_at"] = now_iso()
             save_inspection(inspection)
-            _ck = str(body.get("company_key", "")).strip()
-            _verdict_label, _verdict_display = resolve_verdict_fields(_ck, False, blocked)
             resp_body = {
                 "inspection_id":      inspection_id,
                 "item_id":            item_id,
@@ -3406,7 +3435,11 @@ def analyze_item_image(event, _is_async=False):
         qr_data = {"type": QR_CODE_TYPE_IDENTIFIER, "handle_height_cm": handle_height, "station_id": station_id_raw}
         qr_passed, qr_finding, qr_action, qr_message = validate_extinguisher_height(qr_data)
         if not qr_passed:
-            return _item2_fail(qr_finding, qr_action, qr_message, "height_out_of_range", "height_exceeds_osha_limit", blocked=False)
+            # Definitive height Fail (not retake) — condition maps via ITEM2_CLEAR_FAIL_CONDITIONS
+            return _item2_fail(
+                qr_finding, qr_action, qr_message,
+                "height_out_of_range", "height_exceeds_osha_limit",
+            )
 
         # Claude confirms fire extinguisher is physically visible beside the QR
         ITEM2_FE_CHECK_SYSTEM = (
@@ -3520,6 +3553,9 @@ def analyze_item_image(event, _is_async=False):
         )
         pass_message = f"Height OK — {handle_height} cm. Extinguisher verified."
 
+        _ck = str(body.get("company_key", "")).strip()
+        _pass_label, _pass_display = resolve_verdict_fields(_ck, True, False)
+
         ev = {
             "file_key":          body.get("file_key") or body.get("fileKey") or "",
             "analyzed_at":       now_iso(),
@@ -3533,6 +3569,7 @@ def analyze_item_image(event, _is_async=False):
             "worker_message":    pass_message,
             "suggested_action":  "No corrective action required.",
             "blocked":           False,
+            "verdict_display":   _pass_display,
             "inference_source":  "frontend_qr_decode",
             "qr_height_cm":      handle_height,
             "station_id":        station_id_raw,
@@ -3552,7 +3589,7 @@ def analyze_item_image(event, _is_async=False):
         inspection["updated_at"] = now_iso()
         save_inspection(inspection)
 
-        return build_response(200, {
+        resp_body = {
             "inspection_id":      inspection_id,
             "item_id":            item_id,
             "blocked":            False,
@@ -3572,7 +3609,13 @@ def analyze_item_image(event, _is_async=False):
             "qr_height_cm":       handle_height,
             "inspection":         inspection,
             "categories":         inspection.get("categories", []),
-        })
+            "verdict_display":    _pass_display,
+        }
+        if _ck:
+            resp_body["company_key"] = _ck
+        if _pass_label:
+            resp_body["blocked_verdict_label"] = _pass_label
+        return build_response(200, resp_body)
 
     # ── Items 3–10 (excluding 2): Bedrock image analysis ─────────────────
     COMPONENT_ITEMS = {"8", "9", "10"}
