@@ -10,6 +10,12 @@ Endpoints:
     PUT    /api/resellers/{reseller_key}                      → Update reseller name
     DELETE /api/resellers/{reseller_key}                      → Delete reseller + cascade all companies/locations/stations
 
+    --- Bulk Excel Onboarding ---
+    GET    /api/bulk-setup/template                           → Download blank Excel template
+    POST   /api/bulk-setup                                    → Bulk create entities from uploaded Excel
+    GET    /api/bulk-uploads?company_key={ck}                 → List upload history for company
+    GET    /api/bulk-uploads/{upload_id}/download             → Download original uploaded Excel file
+
     --- Company CRUD ---
     GET    /api/companies                                     → Full nested tree (optionally filtered by ?reseller_key=)
     POST   /api/companies                                     → Create company (optional reseller_key in body)
@@ -33,6 +39,8 @@ DynamoDB Table: osha-dashboard (PK + SK single-table design)
     Company:           PK=COMPANY#{key}         SK=METADATA
     Location:          PK=COMPANY#{ck}          SK=LOCATION#{lk}
     Station:           PK=LOCATION#{lk}         SK=STATION#{id}
+    Upload:            PK=UPLOAD#{upload_id}    SK=METADATA
+    Questions:         PK=LOCATION#{lk}         SK=QUESTIONS#{category}
 """
 
 import json
@@ -65,6 +73,8 @@ logger.setLevel(logging.INFO)
 # ─────────────────────────────────────────────
 dynamodb = boto3.resource("dynamodb")
 dashboard_table = dynamodb.Table(os.getenv("DASHBOARD_TABLE_NAME", "osha-dashboard"))
+s3_client = boto3.client("s3")
+BULK_UPLOAD_BUCKET = os.getenv("BULK_UPLOAD_BUCKET", "osha-bulk-uploads")
 
 # API Key Authentication
 EXPECTED_API_KEY = os.getenv("API_KEY", "").strip()
@@ -2524,6 +2534,481 @@ def get_inspection_details(event):
 
 
 # ═══════════════════════════════════════════════
+# BULK EXCEL ONBOARDING — NEW ENDPOINTS
+# ═══════════════════════════════════════════════
+
+def get_bulk_template(event):
+    """
+    GET /api/bulk-setup/template — Return presigned URL for Excel template download
+    """
+    try:
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': BULK_UPLOAD_BUCKET,
+                'Key': 'templates/bulk_onboarding_template.xlsx'
+            },
+            ExpiresIn=300  # 5 minutes
+        )
+        
+        return build_response(200, {
+            "presigned_url": presigned_url,
+            "expires_in": 300,
+            "file_name": "bulk_onboarding_template.xlsx",
+            "sheets": ["Resellers", "Companies", "Locations", "Stations", "Questions"]
+        })
+    except Exception as e:
+        logger.error(f"Failed to generate presigned URL for template: {str(e)}")
+        return build_response(500, {"error": "Failed to generate download URL", "message": str(e)})
+
+
+def post_bulk_setup(event):
+    """
+    POST /api/bulk-setup — Bulk create entities from uploaded Excel file
+    """
+    import base64
+    
+    body = parse_body(event)
+    
+    # Validate required fields
+    uploaded_by = str(body.get("uploaded_by", "")).strip()
+    file_name = str(body.get("file_name", "")).strip()
+    file_base64 = body.get("file_base64", "")
+    
+    if not uploaded_by:
+        return build_response(400, {"error": "uploaded_by is required"})
+    if not file_name:
+        return build_response(400, {"error": "file_name is required"})
+    if not file_base64:
+        return build_response(400, {"error": "file_base64 is required"})
+    
+    # Validate entity arrays
+    resellers = body.get("resellers", [])
+    companies = body.get("companies", [])
+    locations = body.get("locations", [])
+    stations = body.get("stations", [])
+    question_configs = body.get("question_configs", [])
+    
+    # Validate resellers
+    for idx, reseller in enumerate(resellers):
+        if not reseller.get("name"):
+            return build_response(400, {"error": f"Reseller at index {idx} missing required field: name"})
+    
+    # Validate companies
+    for idx, company in enumerate(companies):
+        if not company.get("name"):
+            return build_response(400, {"error": f"Company at index {idx} missing required field: name"})
+    
+    # Validate locations
+    for idx, location in enumerate(locations):
+        if not location.get("company_name"):
+            return build_response(400, {"error": f"Location at index {idx} missing required field: company_name"})
+        if not location.get("name"):
+            return build_response(400, {"error": f"Location at index {idx} missing required field: name"})
+    
+    # Validate stations
+    for idx, station in enumerate(stations):
+        if not station.get("company_name"):
+            return build_response(400, {"error": f"Station at index {idx} missing required field: company_name"})
+        if not station.get("location_name"):
+            return build_response(400, {"error": f"Station at index {idx} missing required field: location_name"})
+        if not station.get("name"):
+            return build_response(400, {"error": f"Station at index {idx} missing required field: name"})
+        category = station.get("category", "").strip()
+        if category not in VALID_CATEGORY_KEYS:
+            return build_response(400, {"error": f"Station at index {idx} invalid category: {category}"})
+    
+    # Validate question configs
+    for idx, qc in enumerate(question_configs):
+        if not qc.get("location_name"):
+            return build_response(400, {"error": f"Question config at index {idx} missing required field: location_name"})
+        if not qc.get("category"):
+            return build_response(400, {"error": f"Question config at index {idx} missing required field: category"})
+        if qc.get("category") not in VALID_CATEGORY_KEYS:
+            return build_response(400, {"error": f"Question config at index {idx} invalid category: {qc.get('category')}"})
+    
+    # Upload Excel file to S3
+    try:
+        file_bytes = base64.b64decode(file_base64)
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%f")[:-3]
+        s3_key = f"uploads/{timestamp}_{file_name}"
+        
+        s3_client.put_object(
+            Bucket=BULK_UPLOAD_BUCKET,
+            Key=s3_key,
+            Body=file_bytes,
+            ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        logger.info(f"Uploaded file to S3: {s3_key}")
+    except Exception as e:
+        logger.error(f"S3 upload failed: {str(e)}")
+        return build_response(500, {"error": "S3 upload failed", "message": str(e)})
+    
+    # Process entities in dependency order
+    upload_id = str(uuid.uuid4())
+    summary = {
+        "resellers_created": 0,
+        "resellers_skipped": 0,
+        "companies_created": 0,
+        "companies_skipped": 0,
+        "locations_created": 0,
+        "locations_skipped": 0,
+        "stations_created": 0,
+        "stations_skipped": 0,
+        "question_configs_created": 0
+    }
+    
+    # Track created keys for lookups
+    reseller_keys = set()
+    company_keys = {}  # {company_name: company_key}
+    location_keys = {}  # {location_name: (company_key, location_key)}
+    
+    # Step 1: Create Resellers
+    for reseller in resellers:
+        name = reseller["name"].strip()
+        key = slugify(name)
+        
+        existing = dashboard_table.get_item(
+            Key={"PK": f"RESELLER#{key}", "SK": "METADATA"}
+        ).get("Item")
+        
+        if existing:
+            logger.info(f"Reseller '{name}' already exists, skipping")
+            summary["resellers_skipped"] += 1
+        else:
+            try:
+                dashboard_table.put_item(Item={
+                    "PK": f"RESELLER#{key}",
+                    "SK": "METADATA",
+                    "name": name,
+                    "created_at": now_iso()
+                })
+                summary["resellers_created"] += 1
+                logger.info(f"Created reseller: {name} ({key})")
+            except Exception as e:
+                logger.error(f"Failed to create reseller '{name}': {str(e)}")
+        
+        reseller_keys.add(key)
+    
+    # Step 2: Create Companies
+    primary_company_key = None
+    for company in companies:
+        name = company["name"].strip()
+        key = slugify(name)
+        state = company.get("state", "").strip()
+        reseller_name = company.get("reseller_name", "").strip()
+        
+        existing = dashboard_table.get_item(
+            Key={"PK": f"COMPANY#{key}", "SK": "METADATA"}
+        ).get("Item")
+        
+        if existing:
+            logger.info(f"Company '{name}' already exists, skipping")
+            summary["companies_skipped"] += 1
+        else:
+            try:
+                dashboard_table.put_item(Item={
+                    "PK": f"COMPANY#{key}",
+                    "SK": "METADATA",
+                    "name": name,
+                    "state": state,
+                    "created_at": now_iso()
+                })
+                summary["companies_created"] += 1
+                logger.info(f"Created company: {name} ({key})")
+                
+                # Associate with reseller if specified
+                if reseller_name:
+                    reseller_key = slugify(reseller_name)
+                    if reseller_key in reseller_keys:
+                        dashboard_table.put_item(Item={
+                            "PK": f"RESELLER#{reseller_key}",
+                            "SK": f"COMPANY#{key}",
+                            "associated_at": now_iso()
+                        })
+                        logger.info(f"Associated company '{key}' with reseller '{reseller_key}'")
+                    else:
+                        logger.warning(f"Reseller '{reseller_name}' not found for company '{name}'")
+            except Exception as e:
+                logger.error(f"Failed to create company '{name}': {str(e)}")
+        
+        company_keys[name] = key
+        if primary_company_key is None:
+            primary_company_key = key
+    
+    # Step 3: Create Locations
+    for location in locations:
+        company_name = location["company_name"].strip()
+        name = location["name"].strip()
+        state = location.get("state", "").strip()
+        
+        company_key = company_keys.get(company_name)
+        if not company_key:
+            logger.warning(f"Company '{company_name}' not found for location '{name}', skipping")
+            continue
+        
+        location_key = slugify(f"{name}-{state}") if state else slugify(name)
+        
+        existing = dashboard_table.get_item(
+            Key={"PK": f"COMPANY#{company_key}", "SK": f"LOCATION#{location_key}"}
+        ).get("Item")
+        
+        if existing:
+            logger.info(f"Location '{name}' already exists, skipping")
+            summary["locations_skipped"] += 1
+        else:
+            # Parse disabled categories
+            disabled_str = location.get("disabled_categories", "").strip()
+            disabled_categories = []
+            if disabled_str:
+                disabled_categories = [
+                    cat.strip()
+                    for cat in disabled_str.split(",")
+                    if cat.strip() in VALID_CATEGORY_KEYS
+                ]
+            
+            try:
+                dashboard_table.put_item(Item={
+                    "PK": f"COMPANY#{company_key}",
+                    "SK": f"LOCATION#{location_key}",
+                    "name": name,
+                    "state": state,
+                    "address": location.get("address", "").strip(),
+                    "city": location.get("city", "").strip(),
+                    "zip": location.get("zip", "").strip(),
+                    "phone": location.get("phone", "").strip(),
+                    "disabled_categories": disabled_categories,
+                    "created_at": now_iso()
+                })
+                summary["locations_created"] += 1
+                logger.info(f"Created location: {name} ({location_key}) under company {company_key}")
+            except Exception as e:
+                logger.error(f"Failed to create location '{name}': {str(e)}")
+        
+        location_keys[name] = (company_key, location_key)
+    
+    # Step 4: Create Stations
+    for station in stations:
+        company_name = station["company_name"].strip()
+        location_name = station["location_name"].strip()
+        name = station["name"].strip()
+        category = station["category"].strip()
+        
+        location_info = location_keys.get(location_name)
+        if not location_info:
+            logger.warning(f"Location '{location_name}' not found for station '{name}', skipping")
+            continue
+        
+        company_key, location_key = location_info
+        
+        # Generate unique station ID
+        short_id = uuid.uuid4().hex[:6]
+        station_id = f"{location_key}-{category}-{short_id}"
+        
+        # Check for collision (extremely unlikely)
+        existing = dashboard_table.get_item(
+            Key={"PK": f"LOCATION#{location_key}", "SK": f"STATION#{station_id}"}
+        ).get("Item")
+        
+        if existing:
+            # Regenerate ID if collision
+            short_id = uuid.uuid4().hex[:6]
+            station_id = f"{location_key}-{category}-{short_id}"
+        
+        try:
+            dashboard_table.put_item(Item={
+                "PK": f"LOCATION#{location_key}",
+                "SK": f"STATION#{station_id}",
+                "station_id": station_id,
+                "name": name,
+                "typeKey": category,
+                "route": f"/{category}/{location_key}",
+                "status": "ok",
+                "lastInspected": "",
+                "nextDue": "",
+                "notes": "",
+                "company_key": company_key,
+                "created_at": now_iso()
+            })
+            summary["stations_created"] += 1
+            logger.info(f"Created station: {name} ({station_id})")
+        except Exception as e:
+            logger.error(f"Failed to create station '{name}': {str(e)}")
+    
+    # Step 5: Create Question Configs
+    for qc in question_configs:
+        location_name = qc["location_name"].strip()
+        category = qc["category"].strip()
+        
+        location_info = location_keys.get(location_name)
+        if not location_info:
+            logger.warning(f"Location '{location_name}' not found for question config, skipping")
+            continue
+        
+        company_key, location_key = location_info
+        
+        disabled_canned = qc.get("disabled_canned_questions", [])
+        custom_questions = qc.get("custom_questions", [])
+        
+        try:
+            dashboard_table.put_item(Item={
+                "PK": f"LOCATION#{location_key}",
+                "SK": f"QUESTIONS#{category}",
+                "location_key": location_key,
+                "category": category,
+                "disabled_canned_questions": disabled_canned,
+                "custom_questions": custom_questions,
+                "created_at": now_iso()
+            })
+            summary["question_configs_created"] += 1
+            logger.info(f"Created question config for location '{location_key}' category '{category}'")
+        except Exception as e:
+            logger.error(f"Failed to create question config: {str(e)}")
+    
+    # Step 6: Create Upload Audit Record
+    try:
+        dashboard_table.put_item(Item={
+            "PK": f"UPLOAD#{upload_id}",
+            "SK": "METADATA",
+            "upload_id": upload_id,
+            "uploaded_by": uploaded_by,
+            "file_name": file_name,
+            "s3_key": s3_key,
+            "uploaded_at": now_iso(),
+            "company_key": primary_company_key or "",
+            **summary
+        })
+        logger.info(f"Created upload audit record: {upload_id}")
+    except Exception as e:
+        logger.error(f"Failed to create upload audit record: {str(e)}")
+    
+    # Step 7: Invalidate cache
+    _invalidate_dashboard_cache()
+    
+    # Calculate totals
+    summary["total_created"] = (
+        summary["resellers_created"] +
+        summary["companies_created"] +
+        summary["locations_created"] +
+        summary["stations_created"] +
+        summary["question_configs_created"]
+    )
+    summary["total_skipped"] = (
+        summary["resellers_skipped"] +
+        summary["companies_skipped"] +
+        summary["locations_skipped"] +
+        summary["stations_skipped"]
+    )
+    
+    return build_response(201, {
+        "upload_id": upload_id,
+        "s3_key": s3_key,
+        "uploaded_at": now_iso(),
+        "summary": summary
+    })
+
+
+def get_bulk_uploads(event):
+    """
+    GET /api/bulk-uploads?company_key={ck} — List upload history for a company
+    """
+    company_key = get_query(event, "company_key", "").strip()
+    
+    if not company_key:
+        return build_response(400, {"error": "company_key parameter is required"})
+    
+    try:
+        # Scan for uploads with matching company_key
+        response = dashboard_table.scan(
+            FilterExpression=Attr("PK").begins_with("UPLOAD#") & Attr("company_key").eq(company_key)
+        )
+        
+        uploads = []
+        for item in response.get("Items", []):
+            uploads.append({
+                "upload_id": item.get("upload_id", ""),
+                "uploaded_by": item.get("uploaded_by", ""),
+                "file_name": item.get("file_name", ""),
+                "uploaded_at": item.get("uploaded_at", ""),
+                "summary": {
+                    "resellers_created": item.get("resellers_created", 0),
+                    "resellers_skipped": item.get("resellers_skipped", 0),
+                    "companies_created": item.get("companies_created", 0),
+                    "companies_skipped": item.get("companies_skipped", 0),
+                    "locations_created": item.get("locations_created", 0),
+                    "locations_skipped": item.get("locations_skipped", 0),
+                    "stations_created": item.get("stations_created", 0),
+                    "stations_skipped": item.get("stations_skipped", 0),
+                    "question_configs_created": item.get("question_configs_created", 0)
+                }
+            })
+        
+        # Sort by uploaded_at descending (newest first)
+        uploads.sort(key=lambda x: x.get("uploaded_at", ""), reverse=True)
+        
+        return build_response(200, {
+            "company_key": company_key,
+            "uploads": convert_decimals(uploads)
+        })
+    except Exception as e:
+        logger.error(f"Failed to list uploads: {str(e)}")
+        return build_response(500, {"error": "Failed to list uploads", "message": str(e)})
+
+
+def download_bulk_upload(event):
+    """
+    GET /api/bulk-uploads/{upload_id}/download?company_key={ck} — Download original Excel file
+    """
+    path_params = event.get("pathParameters") or {}
+    upload_id = str(path_params.get("upload_id", "")).strip()
+    company_key = get_query(event, "company_key", "").strip()
+    
+    if not upload_id:
+        return build_response(400, {"error": "upload_id is required"})
+    if not company_key:
+        return build_response(400, {"error": "company_key parameter is required"})
+    
+    try:
+        # Retrieve upload record
+        response = dashboard_table.get_item(
+            Key={"PK": f"UPLOAD#{upload_id}", "SK": "METADATA"}
+        )
+        
+        upload_item = response.get("Item")
+        if not upload_item:
+            return build_response(404, {"error": "Upload not found"})
+        
+        # Verify company_key matches
+        if upload_item.get("company_key") != company_key:
+            return build_response(403, {
+                "error": "Access denied: upload does not belong to this company"
+            })
+        
+        # Generate presigned URL
+        s3_key = upload_item.get("s3_key", "")
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': BULK_UPLOAD_BUCKET,
+                'Key': s3_key
+            },
+            ExpiresIn=300  # 5 minutes
+        )
+        
+        return build_response(200, {
+            "upload_id": upload_id,
+            "file_name": upload_item.get("file_name", ""),
+            "uploaded_by": upload_item.get("uploaded_by", ""),
+            "uploaded_at": upload_item.get("uploaded_at", ""),
+            "presigned_url": presigned_url,
+            "expires_in": 300
+        })
+    except Exception as e:
+        logger.error(f"Failed to generate download URL: {str(e)}")
+        return build_response(500, {"error": "Failed to generate download URL", "message": str(e)})
+
+
+# ═══════════════════════════════════════════════
 # Main Handler — Routes to correct function
 # ═══════════════════════════════════════════════
 def lambda_handler(event, context):
@@ -2562,6 +3047,34 @@ def lambda_handler(event, context):
         elif http_method == "DELETE" and resource == "/api/resellers/{reseller_key}":
             return delete_reseller(event)
 
+        # ═══ BULK UPLOAD ROUTES ═══
+        # ── GET /api/bulk-setup/template ──
+        elif http_method == "GET" and (
+            resource == "/api/bulk-setup/template"
+            or path.rstrip("/") == "/api/bulk-setup/template"
+        ):
+            return get_bulk_template(event)
+
+        # ── POST /api/bulk-setup ──
+        elif http_method == "POST" and (
+            resource == "/api/bulk-setup"
+            or path.rstrip("/") == "/api/bulk-setup"
+        ):
+            return post_bulk_setup(event)
+
+        # ── GET /api/bulk-uploads ──
+        elif http_method == "GET" and (
+            resource == "/api/bulk-uploads"
+            or path.rstrip("/") == "/api/bulk-uploads"
+        ):
+            return get_bulk_uploads(event)
+
+        # ── GET /api/bulk-uploads/{upload_id}/download ──
+        elif http_method == "GET" and (
+            resource == "/api/bulk-uploads/{upload_id}/download"
+            or ("/api/bulk-uploads/" in path and path.rstrip("/").endswith("/download"))
+        ):
+            return download_bulk_upload(event)
 
         # ── GET /api/companies ──
         elif http_method == "GET" and resource == "/api/companies":
