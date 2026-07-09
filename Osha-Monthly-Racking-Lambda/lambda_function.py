@@ -1944,9 +1944,9 @@ def lambda_handler(event, context):
         GET  /racking/session/{id}/resume           → resume_session
         OPTIONS (any)                               → CORS preflight
     """
-    http_method = event.get("httpMethod", "")
-    resource = event.get("resource", "")
-    path = event.get("path", "")
+    http_method = event.get("httpMethod") or event.get("requestContext", {}).get("http", {}).get("method", "")
+    resource = event.get("resource") or event.get("routeKey", "")
+    path = event.get("path") or event.get("rawPath", "")
 
     print(f"Received: {http_method} {resource} (path: {path})")  # CloudWatch logging
 

@@ -550,7 +550,7 @@ def build_response(status_code, body):
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Amz-Security-Token,Accept,Origin",
         },
         "body": json.dumps(body, default=str),
     }
@@ -2173,9 +2173,9 @@ def lambda_handler(event, context):
     if event.get("async_worker"):
         return process_async_analyze_worker(event)
 
-    http_method = event.get("httpMethod", "")
-    resource    = event.get("resource", "")
-    path        = event.get("path", "")
+    http_method = event.get("httpMethod") or event.get("requestContext", {}).get("http", {}).get("method", "")
+    resource = event.get("resource") or event.get("routeKey", "")
+    path = event.get("path") or event.get("rawPath", "")
 
     logger.info(f"Received: {http_method} {resource} (path: {path})")
 

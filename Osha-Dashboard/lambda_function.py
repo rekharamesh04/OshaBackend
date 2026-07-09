@@ -283,7 +283,7 @@ def build_response(status_code, body):
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type,x-api-key,X-Amz-Date",
+            "Access-Control-Allow-Headers": "Content-Type,x-api-key,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Accept,Origin",
         },
         "body": json.dumps(body, default=str),
     }
@@ -2539,27 +2539,41 @@ def get_inspection_details(event):
 
 def get_bulk_template(event):
     """
-    GET /api/bulk-setup/template — Return presigned URL for Excel template download
+    GET /api/bulk-setup/template — Download Excel template from S3
     """
+    import base64
+    
     try:
-        presigned_url = s3_client.generate_presigned_url(
+        # Fetch template from S3
+        s3_key = "templates/bulk_onboarding_template.xlsx"
+        
+        logger.info(f"Fetching template from S3: {BULK_UPLOAD_BUCKET}/{s3_key}")
+        
+        response_url = s3_client.generate_presigned_url(
             'get_object',
-            Params={
-                'Bucket': BULK_UPLOAD_BUCKET,
-                'Key': 'templates/bulk_onboarding_template.xlsx'
-            },
-            ExpiresIn=300  # 5 minutes
+            Params={'Bucket': BULK_UPLOAD_BUCKET, 'Key': s3_key},
+            ExpiresIn=3600
         )
         
+        logger.info(f"Generated presigned URL for template")
+        
         return build_response(200, {
-            "presigned_url": presigned_url,
-            "expires_in": 300,
-            "file_name": "bulk_onboarding_template.xlsx",
-            "sheets": ["Resellers", "Companies", "Locations", "Stations", "Questions"]
+            "template_url": response_url,
+            "expires_in": 3600,
+            "file_name": "bulk_onboarding_template.xlsx"
+        })
+    except s3_client.exceptions.NoSuchKey:
+        logger.error(f"Template file not found in S3: {BULK_UPLOAD_BUCKET}/{s3_key}")
+        return build_response(404, {
+            "error": "Template file not found",
+            "message": f"Please upload template to s3://{BULK_UPLOAD_BUCKET}/templates/bulk_onboarding_template.xlsx"
         })
     except Exception as e:
-        logger.error(f"Failed to generate presigned URL for template: {str(e)}")
-        return build_response(500, {"error": "Failed to generate download URL", "message": str(e)})
+        logger.error(f"Failed to fetch template from S3: {str(e)}")
+        return build_response(500, {
+            "error": "Failed to download template",
+            "message": str(e)
+        })
 
 
 def post_bulk_setup(event):
@@ -3016,9 +3030,10 @@ def lambda_handler(event, context):
     Main entry point. Routes based on HTTP method and path.
     """
     try:
-        http_method = event.get("httpMethod", "")
-        resource = event.get("resource", "")
-        path = event.get("path", "")
+        # Support both REST API (v1) and HTTP API (v2) payloads
+        http_method = event.get("httpMethod") or event.get("requestContext", {}).get("http", {}).get("method", "")
+        resource = event.get("resource") or event.get("routeKey", "")
+        path = event.get("path") or event.get("rawPath", "")
 
         logger.info(f"Dashboard: {http_method} {resource} (path: {path})")
 
