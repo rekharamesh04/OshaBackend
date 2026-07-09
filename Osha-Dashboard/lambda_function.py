@@ -2581,27 +2581,144 @@ def post_bulk_setup(event):
     POST /api/bulk-setup — Bulk create entities from uploaded Excel file
     """
     import base64
+    import io
+    import uuid
+    import json
+    from datetime import datetime, timezone
     
+    # Try importing openpyxl
+    try:
+        import openpyxl
+    except ImportError:
+        logger.error("openpyxl is not installed or available in Lambda layer")
+        return build_response(500, {"error": "Excel parsing library (openpyxl) missing in backend"})
+
     body = parse_body(event)
     
-    # Validate required fields
+    # Validate required fields (support both camelCase and snake_case for frontend flexibility)
     uploaded_by = str(body.get("uploaded_by", "")).strip()
-    file_name = str(body.get("file_name", "")).strip()
+    file_name = str(body.get("file_name", body.get("fileName", ""))).strip()
     file_base64 = body.get("file_base64", "")
     
     if not uploaded_by:
         return build_response(400, {"error": "uploaded_by is required"})
     if not file_name:
-        return build_response(400, {"error": "file_name is required"})
+        return build_response(400, {"error": "file_name (or fileName) is required"})
     if not file_base64:
-        return build_response(400, {"error": "file_base64 is required"})
+        return build_response(400, {"error": "file_base64 is required. Frontend must read the file and send as base64 string."})
     
-    # Validate entity arrays
-    resellers = body.get("resellers", [])
-    companies = body.get("companies", [])
-    locations = body.get("locations", [])
-    stations = body.get("stations", [])
-    question_configs = body.get("question_configs", [])
+    try:
+        # Strip potential data URL prefix if frontend sent it (e.g. data:application/vnd...;base64,xxxx)
+        if "," in file_base64:
+            file_base64 = file_base64.split(",")[1]
+            
+        file_bytes = base64.b64decode(file_base64)
+    except Exception as e:
+        logger.error(f"Failed to decode base64: {str(e)}")
+        return build_response(400, {"error": "Invalid file_base64 format"})
+
+    # Upload Excel file to S3
+    try:
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%f")[:-3]
+        s3_key = f"uploads/{timestamp}_{file_name}"
+        
+        s3_client.put_object(
+            Bucket=BULK_UPLOAD_BUCKET,
+            Key=s3_key,
+            Body=file_bytes,
+            ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        logger.info(f"Uploaded file to S3: {s3_key}")
+    except Exception as e:
+        logger.error(f"S3 upload failed: {str(e)}")
+        return build_response(500, {"error": "S3 upload failed", "message": str(e)})
+
+    # ==========================================
+    # Parse Excel file in-memory using openpyxl
+    # ==========================================
+    resellers = []
+    companies = []
+    locations = []
+    stations = []
+    question_configs = []
+
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+        
+        # 1. Parse Resellers
+        if "Resellers" in wb.sheetnames:
+            sheet = wb["Resellers"]
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                if not row or not row[0]:
+                    continue
+                resellers.append({"name": str(row[0]).strip()})
+                
+        # 2. Parse Companies
+        if "Companies" in wb.sheetnames:
+            sheet = wb["Companies"]
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                if not row or not row[1]: # Company Name is index 1
+                    continue
+                companies.append({
+                    "reseller_name": str(row[0]).strip() if row[0] else "",
+                    "name": str(row[1]).strip(),
+                    "state": str(row[2]).strip() if len(row) > 2 and row[2] else ""
+                })
+                
+        # 3. Parse Locations
+        if "Locations" in wb.sheetnames:
+            sheet = wb["Locations"]
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                if not row or not row[0] or not row[1]: # Company Name, Location Name
+                    continue
+                locations.append({
+                    "company_name": str(row[0]).strip(),
+                    "name": str(row[1]).strip(),
+                    "state": str(row[2]).strip() if len(row) > 2 and row[2] else "",
+                    "address": str(row[3]).strip() if len(row) > 3 and row[3] else "",
+                    "city": str(row[4]).strip() if len(row) > 4 and row[4] else "",
+                    "zip": str(row[5]).strip() if len(row) > 5 and row[5] else "",
+                    "phone": str(row[6]).strip() if len(row) > 6 and row[6] else "",
+                    "disabled_categories": [cat.strip() for cat in str(row[7]).split(',')] if len(row) > 7 and row[7] else []
+                })
+                
+        # 4. Parse Stations
+        if "Stations" in wb.sheetnames:
+            sheet = wb["Stations"]
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                if not row or not row[0] or not row[1] or not row[2] or not row[3]:
+                    continue
+                stations.append({
+                    "company_name": str(row[0]).strip(),
+                    "location_name": str(row[1]).strip(),
+                    "name": str(row[2]).strip(),
+                    "category": str(row[3]).strip()
+                })
+                
+        # 5. Parse Questions
+        if "Questions" in wb.sheetnames:
+            sheet = wb["Questions"]
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                if not row or not row[0] or not row[1]: # Location Name, Category
+                    continue
+                disabled_canned = [q.strip() for q in str(row[2]).split(',')] if len(row) > 2 and row[2] else []
+                custom_questions = [q.strip() for q in str(row[3]).split(',')] if len(row) > 3 and row[3] else []
+                
+                # Transform to expected payload structure: {location_name, category, disabled_canned_ids, custom_questions: [{text}]}
+                question_configs.append({
+                    "location_name": str(row[0]).strip(),
+                    "category": str(row[1]).strip(),
+                    "disabled_canned_ids": disabled_canned,
+                    "custom_questions": [{"text": q} for q in custom_questions if q]
+                })
+
+    except Exception as e:
+        logger.error(f"Excel parsing failed: {str(e)}")
+        return build_response(400, {"error": "Failed to parse Excel file", "message": str(e)})
+
+    # ==========================================
+    # Validation & Insertion (Dependency Order)
+    # ==========================================
     
     # Validate resellers
     for idx, reseller in enumerate(resellers):
@@ -2641,38 +2758,15 @@ def post_bulk_setup(event):
         if qc.get("category") not in VALID_CATEGORY_KEYS:
             return build_response(400, {"error": f"Question config at index {idx} invalid category: {qc.get('category')}"})
     
-    # Upload Excel file to S3
-    try:
-        file_bytes = base64.b64decode(file_base64)
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%f")[:-3]
-        s3_key = f"uploads/{timestamp}_{file_name}"
-        
-        s3_client.put_object(
-            Bucket=BULK_UPLOAD_BUCKET,
-            Key=s3_key,
-            Body=file_bytes,
-            ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        logger.info(f"Uploaded file to S3: {s3_key}")
-    except Exception as e:
-        logger.error(f"S3 upload failed: {str(e)}")
-        return build_response(500, {"error": "S3 upload failed", "message": str(e)})
-    
-    # Process entities in dependency order
     upload_id = str(uuid.uuid4())
     summary = {
-        "resellers_created": 0,
-        "resellers_skipped": 0,
-        "companies_created": 0,
-        "companies_skipped": 0,
-        "locations_created": 0,
-        "locations_skipped": 0,
-        "stations_created": 0,
-        "stations_skipped": 0,
+        "resellers_created": 0, "resellers_skipped": 0,
+        "companies_created": 0, "companies_skipped": 0,
+        "locations_created": 0, "locations_skipped": 0,
+        "stations_created": 0, "stations_skipped": 0,
         "question_configs_created": 0
     }
     
-    # Track created keys for lookups
     reseller_keys = set()
     company_keys = {}  # {company_name: company_key}
     location_keys = {}  # {location_name: (company_key, location_key)}
@@ -2682,244 +2776,140 @@ def post_bulk_setup(event):
         name = reseller["name"].strip()
         key = slugify(name)
         
-        existing = dashboard_table.get_item(
-            Key={"PK": f"RESELLER#{key}", "SK": "METADATA"}
-        ).get("Item")
-        
+        existing = dashboard_table.get_item(Key={"PK": f"RESELLER#{key}", "SK": "METADATA"}).get("Item")
         if existing:
             logger.info(f"Reseller '{name}' already exists, skipping")
             summary["resellers_skipped"] += 1
         else:
             try:
                 dashboard_table.put_item(Item={
-                    "PK": f"RESELLER#{key}",
-                    "SK": "METADATA",
-                    "name": name,
-                    "created_at": now_iso()
+                    "PK": f"RESELLER#{key}", "SK": "METADATA", "name": name, "created_at": now_iso()
                 })
                 summary["resellers_created"] += 1
-                logger.info(f"Created reseller: {name} ({key})")
             except Exception as e:
-                logger.error(f"Failed to create reseller '{name}': {str(e)}")
-        
+                logger.error(f"Failed to create reseller '{name}': {e}")
         reseller_keys.add(key)
-    
+        
     # Step 2: Create Companies
-    primary_company_key = None
     for company in companies:
         name = company["name"].strip()
+        res_name = company.get("reseller_name", "").strip()
+        res_key = slugify(res_name) if res_name else "default-reseller"
+        
+        # Ensure fallback reseller exists
+        if res_key == "default-reseller" and res_key not in reseller_keys:
+            if not dashboard_table.get_item(Key={"PK": f"RESELLER#{res_key}", "SK": "METADATA"}).get("Item"):
+                dashboard_table.put_item(Item={
+                    "PK": f"RESELLER#{res_key}", "SK": "METADATA", "name": "Default Reseller", "created_at": now_iso()
+                })
+            reseller_keys.add(res_key)
+            
         key = slugify(name)
-        state = company.get("state", "").strip()
-        reseller_name = company.get("reseller_name", "").strip()
+        company_keys[name] = key
         
-        existing = dashboard_table.get_item(
-            Key={"PK": f"COMPANY#{key}", "SK": "METADATA"}
-        ).get("Item")
-        
+        existing = dashboard_table.get_item(Key={"PK": f"COMPANY#{key}", "SK": "METADATA"}).get("Item")
         if existing:
             logger.info(f"Company '{name}' already exists, skipping")
             summary["companies_skipped"] += 1
         else:
-            try:
-                dashboard_table.put_item(Item={
-                    "PK": f"COMPANY#{key}",
-                    "SK": "METADATA",
-                    "name": name,
-                    "state": state,
-                    "created_at": now_iso()
-                })
-                summary["companies_created"] += 1
-                logger.info(f"Created company: {name} ({key})")
-                
-                # Associate with reseller if specified
-                if reseller_name:
-                    reseller_key = slugify(reseller_name)
-                    if reseller_key in reseller_keys:
-                        dashboard_table.put_item(Item={
-                            "PK": f"RESELLER#{reseller_key}",
-                            "SK": f"COMPANY#{key}",
-                            "associated_at": now_iso()
-                        })
-                        logger.info(f"Associated company '{key}' with reseller '{reseller_key}'")
-                    else:
-                        logger.warning(f"Reseller '{reseller_name}' not found for company '{name}'")
-            except Exception as e:
-                logger.error(f"Failed to create company '{name}': {str(e)}")
+            dashboard_table.put_item(Item={
+                "PK": f"COMPANY#{key}", "SK": "METADATA",
+                "name": name, "state": company.get("state", ""),
+                "reseller_key": res_key, "created_at": now_iso()
+            })
+            summary["companies_created"] += 1
         
-        company_keys[name] = key
-        if primary_company_key is None:
-            primary_company_key = key
-    
+        # Link company to reseller (REQUIRED for sidebar tree)
+        dashboard_table.put_item(Item={
+            "PK": f"RESELLER#{res_key}",
+            "SK": f"COMPANY#{key}",
+            "associated_at": now_iso(),
+        })
+            
     # Step 3: Create Locations
-    for location in locations:
-        company_name = location["company_name"].strip()
-        name = location["name"].strip()
-        state = location.get("state", "").strip()
+    for loc in locations:
+        c_name = loc["company_name"].strip()
+        l_name = loc["name"].strip()
         
-        company_key = company_keys.get(company_name)
-        if not company_key:
-            logger.warning(f"Company '{company_name}' not found for location '{name}', skipping")
-            continue
+        c_key = company_keys.get(c_name)
+        if not c_key:
+            c_key = slugify(c_name)
+            
         
-        location_key = slugify(f"{name}-{state}") if state else slugify(name)
+        l_key = slugify(f"{l_name}-{loc.get('state', '')}") if loc.get("state") else slugify(l_name)
+        location_keys[l_name] = (c_key, l_key)
         
-        existing = dashboard_table.get_item(
-            Key={"PK": f"COMPANY#{company_key}", "SK": f"LOCATION#{location_key}"}
-        ).get("Item")
-        
+        existing = dashboard_table.get_item(Key={"PK": f"COMPANY#{c_key}", "SK": f"LOCATION#{l_key}"}).get("Item")
         if existing:
-            logger.info(f"Location '{name}' already exists, skipping")
+            logger.info(f"Location '{l_name}' already exists, skipping")
             summary["locations_skipped"] += 1
         else:
-            # Parse disabled categories
-            disabled_str = location.get("disabled_categories", "").strip()
-            disabled_categories = []
-            if disabled_str:
-                disabled_categories = [
-                    cat.strip()
-                    for cat in disabled_str.split(",")
-                    if cat.strip() in VALID_CATEGORY_KEYS
-                ]
+            dashboard_table.put_item(Item={
+                "PK": f"COMPANY#{c_key}", "SK": f"LOCATION#{l_key}",
+                "name": l_name, "state": loc.get("state", ""),
+                "address": loc.get("address", ""), "city": loc.get("city", ""),
+                "zip": loc.get("zip", ""), "phone": loc.get("phone", ""),
+                "disabled_categories": loc.get("disabled_categories", []),
+                "created_at": now_iso()
+            })
+            summary["locations_created"] += 1
             
-            try:
-                dashboard_table.put_item(Item={
-                    "PK": f"COMPANY#{company_key}",
-                    "SK": f"LOCATION#{location_key}",
-                    "name": name,
-                    "state": state,
-                    "address": location.get("address", "").strip(),
-                    "city": location.get("city", "").strip(),
-                    "zip": location.get("zip", "").strip(),
-                    "phone": location.get("phone", "").strip(),
-                    "disabled_categories": disabled_categories,
-                    "created_at": now_iso()
-                })
-                summary["locations_created"] += 1
-                logger.info(f"Created location: {name} ({location_key}) under company {company_key}")
-            except Exception as e:
-                logger.error(f"Failed to create location '{name}': {str(e)}")
-        
-        location_keys[name] = (company_key, location_key)
-    
     # Step 4: Create Stations
     for station in stations:
-        company_name = station["company_name"].strip()
-        location_name = station["location_name"].strip()
-        name = station["name"].strip()
-        category = station["category"].strip()
+        l_name = station["location_name"].strip()
+        s_name = station["name"].strip()
+        cat = station["category"].strip()
         
-        location_info = location_keys.get(location_name)
-        if not location_info:
-            logger.warning(f"Location '{location_name}' not found for station '{name}', skipping")
-            continue
+        c_key, l_key = location_keys.get(l_name, (slugify(station["company_name"]), slugify(l_name)))
+        s_key = slugify(s_name)
+        st_id = f"{l_key}-{cat}-{s_key}"
         
-        company_key, location_key = location_info
-        
-        # Generate unique station ID
-        short_id = uuid.uuid4().hex[:6]
-        station_id = f"{location_key}-{category}-{short_id}"
-        
-        # Check for collision (extremely unlikely)
-        existing = dashboard_table.get_item(
-            Key={"PK": f"LOCATION#{location_key}", "SK": f"STATION#{station_id}"}
-        ).get("Item")
-        
+        existing = dashboard_table.get_item(Key={"PK": f"LOCATION#{l_key}", "SK": f"STATION#{st_id}"}).get("Item")
         if existing:
-            # Regenerate ID if collision
-            short_id = uuid.uuid4().hex[:6]
-            station_id = f"{location_key}-{category}-{short_id}"
-        
-        try:
+            summary["stations_skipped"] += 1
+        else:
             dashboard_table.put_item(Item={
-                "PK": f"LOCATION#{location_key}",
-                "SK": f"STATION#{station_id}",
-                "station_id": station_id,
-                "name": name,
-                "typeKey": category,
-                "route": f"/{category}/{location_key}",
-                "status": "ok",
-                "lastInspected": "",
-                "nextDue": "",
-                "notes": "",
-                "company_key": company_key,
-                "created_at": now_iso()
+                "PK": f"LOCATION#{l_key}", "SK": f"STATION#{st_id}",
+                "station_id": st_id, "name": s_name, "typeKey": cat,
+                "company_key": c_key, "created_at": now_iso()
             })
             summary["stations_created"] += 1
-            logger.info(f"Created station: {name} ({station_id})")
-        except Exception as e:
-            logger.error(f"Failed to create station '{name}': {str(e)}")
-    
-    # Step 5: Create Question Configs
+            
+    # Step 5: Process Question Configurations
     for qc in question_configs:
-        location_name = qc["location_name"].strip()
-        category = qc["category"].strip()
+        l_name = qc["location_name"].strip()
+        c_key, l_key = location_keys.get(l_name, (None, slugify(l_name)))
         
-        location_info = location_keys.get(location_name)
-        if not location_info:
-            logger.warning(f"Location '{location_name}' not found for question config, skipping")
-            continue
-        
-        company_key, location_key = location_info
-        
-        disabled_canned = qc.get("disabled_canned_questions", [])
-        custom_questions = qc.get("custom_questions", [])
-        
-        try:
-            dashboard_table.put_item(Item={
-                "PK": f"LOCATION#{location_key}",
-                "SK": f"QUESTIONS#{category}",
-                "location_key": location_key,
-                "category": category,
-                "disabled_canned_questions": disabled_canned,
-                "custom_questions": custom_questions,
-                "created_at": now_iso()
-            })
-            summary["question_configs_created"] += 1
-            logger.info(f"Created question config for location '{location_key}' category '{category}'")
-        except Exception as e:
-            logger.error(f"Failed to create question config: {str(e)}")
-    
-    # Step 6: Create Upload Audit Record
-    try:
         dashboard_table.put_item(Item={
-            "PK": f"UPLOAD#{upload_id}",
-            "SK": "METADATA",
-            "upload_id": upload_id,
-            "uploaded_by": uploaded_by,
-            "file_name": file_name,
-            "s3_key": s3_key,
-            "uploaded_at": now_iso(),
-            "company_key": primary_company_key or "",
-            **summary
+            "PK": f"LOCATION#{l_key}",
+            "SK": f"QUESTIONS#{qc['category']}",
+            "disabled_canned_ids": qc.get("disabled_canned_ids", []),
+            "custom_questions": qc.get("custom_questions", []),
+            "updated_at": now_iso()
         })
-        logger.info(f"Created upload audit record: {upload_id}")
-    except Exception as e:
-        logger.error(f"Failed to create upload audit record: {str(e)}")
+        summary["question_configs_created"] += 1
+        
+    # Record Bulk Upload History
+    dashboard_table.put_item(Item={
+        "PK": f"UPLOAD#{upload_id}",
+        "SK": "METADATA",
+        "upload_id": upload_id,
+        "filename": file_name,
+        "s3_key": s3_key,
+        "uploaded_by": uploaded_by,
+        "timestamp": now_iso(),
+        "summary": summary,
+        "status": "COMPLETED"
+    })
     
-    # Step 7: Invalidate cache
     _invalidate_dashboard_cache()
     
-    # Calculate totals
-    summary["total_created"] = (
-        summary["resellers_created"] +
-        summary["companies_created"] +
-        summary["locations_created"] +
-        summary["stations_created"] +
-        summary["question_configs_created"]
-    )
-    summary["total_skipped"] = (
-        summary["resellers_skipped"] +
-        summary["companies_skipped"] +
-        summary["locations_skipped"] +
-        summary["stations_skipped"]
-    )
-    
-    return build_response(201, {
+    return build_response(200, {
+        "message": "Bulk upload processed successfully",
         "upload_id": upload_id,
-        "s3_key": s3_key,
-        "uploaded_at": now_iso(),
         "summary": summary
     })
+
 
 
 def get_bulk_uploads(event):
