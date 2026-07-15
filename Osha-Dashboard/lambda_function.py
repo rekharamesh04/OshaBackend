@@ -91,6 +91,8 @@ inspection_tables = {
 
 # Centralized session table (shared across all inspection types)
 session_table = dynamodb.Table(os.getenv("SESSION_TABLE_NAME", "osha-inspection-sessions"))
+templates_table = dynamodb.Table(os.getenv("CHECKLIST_TEMPLATE_TABLE", "osha-checklist-templates"))
+
 
 # Maps category key (dashboard/mobile) → inspection_type value stored in session table
 CATEGORY_TO_INSPECTION_TYPE = {
@@ -634,11 +636,13 @@ def get_resellers(event):
         type_buckets = {tk: [] for tk in _st_type_keys}
         for s in loc_stations:
             tk = s.get("typeKey", "")
-            if tk in type_buckets:
-                type_buckets[tk].append(s)
+            if tk not in type_buckets:
+                type_buckets[tk] = []  # custom category discovered
+            type_buckets[tk].append(s)
         loc_copy = {k: v for k, v in loc.items() if k != "disabled_categories"}
         disabled_set = set(loc.get("disabled_categories") or [])
-        loc_copy["stationTypes"] = [
+        # Start with preset station types
+        station_types = [
             {
                 "key": st["key"], "label": st["label"], "icon": st["icon"],
                 "is_enabled": st["key"] not in disabled_set,
@@ -646,6 +650,15 @@ def get_resellers(event):
             }
             for st in STATION_TYPES
         ]
+        # Append any custom categories not in STATION_TYPES
+        for tk, tk_stations in type_buckets.items():
+            if tk and tk not in _st_type_keys:
+                station_types.append({
+                    "key": tk, "label": tk.replace("-", " ").title(), "icon": "fa-box",
+                    "is_enabled": tk not in disabled_set,
+                    "stations": tk_stations,
+                })
+        loc_copy["stationTypes"] = station_types
         return loc_copy
 
     def _build_company(ck):
@@ -862,8 +875,9 @@ def get_companies(event):
             type_buckets = {tk: [] for tk in _st_type_keys}
             for s in loc_stations:
                 tk = s.get("typeKey", "")
-                if tk in type_buckets:
-                    type_buckets[tk].append(s)
+                if tk not in type_buckets:
+                    type_buckets[tk] = []  # custom category discovered
+                type_buckets[tk].append(s)
 
             disabled_set = set(loc.get("disabled_categories") or [])
 
@@ -877,6 +891,14 @@ def get_companies(event):
                 }
                 for st in STATION_TYPES
             ]
+            # Append custom categories not in STATION_TYPES
+            for tk, tk_stations in type_buckets.items():
+                if tk and tk not in _st_type_keys:
+                    station_types.append({
+                        "key": tk, "label": tk.replace("-", " ").title(), "icon": "fa-box",
+                        "is_enabled": tk not in disabled_set,
+                        "stations": tk_stations,
+                    })
 
             loc_copy = {k: v for k, v in loc.items() if k != "disabled_categories"}
             loc_copy["stationTypes"] = station_types
@@ -1519,10 +1541,18 @@ def admin_list_inspections(event):
                 facility_area = str(raw.get("facility_area") or "")
 
                 stored_status = str(raw.get("status") or "").strip()
-                if stored_status in ("paused", "in_progress"):
+
+                # DEFENSIVE: Compute from actual data first; stored_status is used
+                # only when the computed result is ambiguous.  This ensures a fully
+                # answered inspection always shows "completed" on the dashboard
+                # even if its stored status field was never updated (stale record).
+                computed_status = compute_inspection_status(categories, general_results)
+                if computed_status == "completed":
+                    status = "completed"
+                elif stored_status in ("paused", "in_progress"):
                     status = stored_status
                 else:
-                    status = compute_inspection_status(categories, general_results)
+                    status = computed_status
 
                 evidence = count_evidence(categories)
 
@@ -2214,21 +2244,26 @@ def mobile_inspection_status(event):
                 if not matched_station_id:
                     continue
 
-                # Compute status
+                # ── Compute status ──────────────────────────────────────────
+                # DEFENSIVE: Always compute from actual answers first.
+                # A fully-answered inspection must show "completed" even if the
+                # stored status field is still stale (e.g. "in_progress" because
+                # the submit handler set it before this fix was deployed).
                 categories = raw.get("categories") or []
                 general_results = raw.get("general_results") or []
                 stored_status = str(raw.get("status") or "").strip()
 
-                if stored_status in ("paused", "in_progress"):
+                computed = compute_inspection_status(categories, general_results)
+                if computed == "completed":
+                    # All items answered → inspection is done, regardless of stored_status
+                    status = "completed"
+                elif stored_status in ("paused", "in_progress"):
+                    # Stored status is authoritative for paused / in-progress
+                    status = "started"
+                elif computed == "in_progress":
                     status = "started"
                 else:
-                    computed = compute_inspection_status(categories, general_results)
-                    if computed == "completed":
-                        status = "completed"
-                    elif computed == "in_progress":
-                        status = "started"
-                    else:
-                        status = "started"  # Record exists but no answers = started
+                    status = "started"  # Record exists but no answers yet = started
 
                 created_at = str(raw.get("created_at") or "")
                 completed_at = str(raw.get("completed_at") or "") if raw.get("completed_at") else None
@@ -2635,6 +2670,7 @@ def post_bulk_setup(event):
 
     # ==========================================
     # Parse Excel file in-memory using openpyxl
+    # V2 Flat Template: single "Data" sheet
     # ==========================================
     resellers = []
     companies = []
@@ -2642,102 +2678,253 @@ def post_bulk_setup(event):
     stations = []
     question_configs = []
 
+    # Dedup tracking sets (by name, to avoid duplicate list entries)
+    _seen_resellers = set()
+    _seen_companies = set()
+    _seen_locations = {}  # {(company_name, location_name): index in locations[]}
+
     try:
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-        
-        # 1. Parse Resellers
-        if "Resellers" in wb.sheetnames:
-            sheet = wb["Resellers"]
-            for row in sheet.iter_rows(min_row=2, values_only=True):
-                if not row or not row[0]:
-                    continue
-                resellers.append({"name": str(row[0]).strip()})
-                
-        # 2. Parse Companies
-        if "Companies" in wb.sheetnames:
-            sheet = wb["Companies"]
-            for row in sheet.iter_rows(min_row=2, values_only=True):
-                if not row or not row[1]: # Company Name is index 1
-                    continue
-                companies.append({
-                    "reseller_name": str(row[0]).strip() if row[0] else "",
-                    "name": str(row[1]).strip(),
-                    "state": str(row[2]).strip() if len(row) > 2 and row[2] else ""
-                })
-                
-        # 3. Parse Locations
-        if "Locations" in wb.sheetnames:
-            sheet = wb["Locations"]
-            for row in sheet.iter_rows(min_row=2, values_only=True):
-                if not row or not row[0] or not row[1]: # Company Name, Location Name
-                    continue
-                locations.append({
-                    "company_name": str(row[0]).strip(),
-                    "name": str(row[1]).strip(),
-                    "state": str(row[2]).strip() if len(row) > 2 and row[2] else "",
-                    "address": str(row[3]).strip() if len(row) > 3 and row[3] else "",
-                    "city": str(row[4]).strip() if len(row) > 4 and row[4] else "",
-                    "zip": str(row[5]).strip() if len(row) > 5 and row[5] else "",
-                    "phone": str(row[6]).strip() if len(row) > 6 and row[6] else "",
-                    "disabled_categories": [cat.strip() for cat in str(row[7]).split(',')] if len(row) > 7 and row[7] else []
-                })
-                
-        # 4. Parse Stations
-        if "Stations" in wb.sheetnames:
-            sheet = wb["Stations"]
-            for row in sheet.iter_rows(min_row=2, values_only=True):
-                if not row or not row[0] or not row[1] or not row[2] or not row[3]:
-                    continue
-                stations.append({
-                    "company_name": str(row[0]).strip(),
-                    "location_name": str(row[1]).strip(),
-                    "name": str(row[2]).strip(),
-                    "category": str(row[3]).strip()
-                })
-                
-        # 5. Parse Questions
-        if "Questions" in wb.sheetnames:
-            sheet = wb["Questions"]
-            for row in sheet.iter_rows(min_row=2, values_only=True):
-                if not row or not row[0] or not row[1]: # Location Name, Category
-                    continue
-                disabled_canned = [q.strip() for q in str(row[2]).split(',')] if len(row) > 2 and row[2] else []
-                custom_questions = [q.strip() for q in str(row[3]).split(',')] if len(row) > 3 and row[3] else []
-                
-                # Transform to expected payload structure: {location_name, category, disabled_canned_ids, custom_questions: [{text}]}
-                question_configs.append({
-                    "location_name": str(row[0]).strip(),
-                    "category": str(row[1]).strip(),
-                    "disabled_canned_ids": disabled_canned,
-                    "custom_questions": [{"text": q} for q in custom_questions if q]
-                })
+
+        # Support both old 5-sheet and new 2-sheet (Data) format
+        if "Data" in wb.sheetnames:
+            # ── V2 flat template ──
+            sheet = wb["Data"]
+            # Carry-forward state
+            carry_reseller = ""
+            carry_company = ""
+            carry_company_state = ""
+            carry_location = ""
+            carry_location_state = ""
+            carry_address = ""
+            carry_city = ""
+            carry_zip = ""
+            carry_phone = ""
+
+            def _cell(row, idx):
+                """Safe cell read: return stripped string or empty string."""
+                if idx < len(row) and row[idx] is not None:
+                    return str(row[idx]).strip()
+                return ""
+
+            # Row 1 = headers, Row 2 = helper text, data starts at row 3
+            for row_idx, row in enumerate(sheet.iter_rows(min_row=3, values_only=True), start=3):
+                if not row or all(c is None for c in row):
+                    continue  # skip blank rows
+
+                # Read cells
+                reseller_name = _cell(row, 0)
+                company_name  = _cell(row, 1)
+                company_state = _cell(row, 2)
+                location_name = _cell(row, 3)
+                location_state = _cell(row, 4)
+                address       = _cell(row, 5)
+                city          = _cell(row, 6)
+                zip_code      = _cell(row, 7)
+                phone         = _cell(row, 8)
+                disabled_cats = _cell(row, 9)
+                station_name  = _cell(row, 10)
+                category      = _cell(row, 11)
+                disabled_canned = _cell(row, 12)
+                custom_qs     = _cell(row, 13)
+
+                # ── Carry-forward logic ──
+                if reseller_name:
+                    carry_reseller = reseller_name
+                else:
+                    reseller_name = carry_reseller
+
+                if company_name:
+                    carry_company = company_name
+                    carry_company_state = company_state
+                else:
+                    company_name = carry_company
+                    if not company_state:
+                        company_state = carry_company_state
+
+                if location_name:
+                    carry_location = location_name
+                    carry_location_state = location_state
+                    carry_address = address
+                    carry_city = city
+                    carry_zip = zip_code
+                    carry_phone = phone
+                else:
+                    location_name = carry_location
+                    if not location_state:
+                        location_state = carry_location_state
+                    if not address:
+                        address = carry_address
+                    if not city:
+                        city = carry_city
+                    if not zip_code:
+                        zip_code = carry_zip
+                    if not phone:
+                        phone = carry_phone
+
+                # ── Validation: skip rows without required fields ──
+                if not company_name:
+                    continue  # can't do anything without a company
+                if not reseller_name:
+                    return build_response(400, {
+                        "error": f"Row {row_idx}: Reseller Name is required for company '{company_name}'"
+                    })
+
+                # ── Collect Reseller (deduplicated) ──
+                if reseller_name not in _seen_resellers:
+                    resellers.append({"name": reseller_name})
+                    _seen_resellers.add(reseller_name)
+
+                # ── Collect Company (deduplicated) ──
+                if company_name not in _seen_companies:
+                    companies.append({
+                        "reseller_name": reseller_name,
+                        "name": company_name,
+                        "state": company_state,
+                    })
+                    _seen_companies.add(company_name)
+
+                # ── Collect Location (deduplicated by company+location) ──
+                if location_name:
+                    loc_key_tuple = (company_name, location_name)
+                    if loc_key_tuple not in _seen_locations:
+                        disabled_list = [c.strip() for c in disabled_cats.split(",") if c.strip()] if disabled_cats else []
+                        locations.append({
+                            "company_name": company_name,
+                            "name": location_name,
+                            "state": location_state,
+                            "address": address,
+                            "city": city,
+                            "zip": zip_code,
+                            "phone": phone,
+                            "disabled_categories": disabled_list,
+                        })
+                        _seen_locations[loc_key_tuple] = len(locations) - 1
+                    elif disabled_cats:
+                        # Backfill: merge disabled categories from later rows
+                        idx = _seen_locations[loc_key_tuple]
+                        extra = [c.strip() for c in disabled_cats.split(",") if c.strip()]
+                        existing = set(locations[idx].get("disabled_categories", []))
+                        existing.update(extra)
+                        locations[idx]["disabled_categories"] = list(existing)
+
+                # ── Collect Station (every row with station_name) ──
+                if station_name and location_name:
+                    if not category:
+                        return build_response(400, {
+                            "error": f"Row {row_idx}: Category is required when Station Name is filled (station: '{station_name}')"
+                        })
+                    stations.append({
+                        "company_name": company_name,
+                        "location_name": location_name,
+                        "name": station_name,
+                        "category": category,
+                    })
+
+                # ── Collect Question Configs (when question columns are filled) ──
+                if location_name and category and (disabled_canned or custom_qs):
+                    dc_list = [q.strip() for q in disabled_canned.split(",") if q.strip()] if disabled_canned else []
+                    cq_list = [q.strip() for q in custom_qs.split(",") if q.strip()] if custom_qs else []
+                    if dc_list or cq_list:
+                        question_configs.append({
+                            "company_name": company_name,
+                            "location_name": location_name,
+                            "category": category,
+                            "disabled_canned_ids": dc_list,
+                            "custom_questions": [{"text": q} for q in cq_list if q],
+                        })
+
+
+        else:
+            # ── Legacy 5-sheet format (backward compatible) ──
+            if "Resellers" in wb.sheetnames:
+                sheet = wb["Resellers"]
+                for row in sheet.iter_rows(min_row=2, values_only=True):
+                    if not row or not row[0]:
+                        continue
+                    resellers.append({"name": str(row[0]).strip()})
+
+            if "Companies" in wb.sheetnames:
+                sheet = wb["Companies"]
+                for row in sheet.iter_rows(min_row=2, values_only=True):
+                    if not row or not row[1]:
+                        continue
+                    companies.append({
+                        "reseller_name": str(row[0]).strip() if row[0] else "",
+                        "name": str(row[1]).strip(),
+                        "state": str(row[2]).strip() if len(row) > 2 and row[2] else ""
+                    })
+
+            if "Locations" in wb.sheetnames:
+                sheet = wb["Locations"]
+                for row in sheet.iter_rows(min_row=2, values_only=True):
+                    if not row or not row[0] or not row[1]:
+                        continue
+                    locations.append({
+                        "company_name": str(row[0]).strip(),
+                        "name": str(row[1]).strip(),
+                        "state": str(row[2]).strip() if len(row) > 2 and row[2] else "",
+                        "address": str(row[3]).strip() if len(row) > 3 and row[3] else "",
+                        "city": str(row[4]).strip() if len(row) > 4 and row[4] else "",
+                        "zip": str(row[5]).strip() if len(row) > 5 and row[5] else "",
+                        "phone": str(row[6]).strip() if len(row) > 6 and row[6] else "",
+                        "disabled_categories": [cat.strip() for cat in str(row[7]).split(',') if cat.strip()] if len(row) > 7 and row[7] else []
+                    })
+
+            if "Stations" in wb.sheetnames:
+                sheet = wb["Stations"]
+                for row in sheet.iter_rows(min_row=2, values_only=True):
+                    if not row or not row[0] or not row[1] or not row[2] or not row[3]:
+                        continue
+                    stations.append({
+                        "company_name": str(row[0]).strip(),
+                        "location_name": str(row[1]).strip(),
+                        "name": str(row[2]).strip(),
+                        "category": str(row[3]).strip()
+                    })
+
+            if "Questions" in wb.sheetnames:
+                sheet = wb["Questions"]
+                for row in sheet.iter_rows(min_row=2, values_only=True):
+                    if not row or not row[0] or not row[1]:
+                        continue
+                    disabled_canned = [q.strip() for q in str(row[2]).split(',') if q.strip()] if len(row) > 2 and row[2] else []
+                    custom_questions_raw = [q.strip() for q in str(row[3]).split(',') if q.strip()] if len(row) > 3 and row[3] else []
+                    question_configs.append({
+                        "location_name": str(row[0]).strip(),
+                        "category": str(row[1]).strip(),
+                        "disabled_canned_ids": disabled_canned,
+                        "custom_questions": [{"text": q} for q in custom_questions_raw if q]
+                    })
 
     except Exception as e:
         logger.error(f"Excel parsing failed: {str(e)}")
         return build_response(400, {"error": "Failed to parse Excel file", "message": str(e)})
 
     # ==========================================
-    # Validation & Insertion (Dependency Order)
+    # Validation (Dependency Order)
     # ==========================================
-    
+
     # Validate resellers
     for idx, reseller in enumerate(resellers):
         if not reseller.get("name"):
             return build_response(400, {"error": f"Reseller at index {idx} missing required field: name"})
-    
-    # Validate companies
+
+    # Validate companies — reseller_name is now required
     for idx, company in enumerate(companies):
         if not company.get("name"):
             return build_response(400, {"error": f"Company at index {idx} missing required field: name"})
-    
+        if not company.get("reseller_name"):
+            return build_response(400, {"error": f"Company '{company.get('name')}' missing required field: reseller_name"})
+
     # Validate locations
     for idx, location in enumerate(locations):
         if not location.get("company_name"):
             return build_response(400, {"error": f"Location at index {idx} missing required field: company_name"})
         if not location.get("name"):
             return build_response(400, {"error": f"Location at index {idx} missing required field: name"})
-    
-    # Validate stations
+
+    # Validate stations — allow ANY category (custom categories supported)
     for idx, station in enumerate(stations):
         if not station.get("company_name"):
             return build_response(400, {"error": f"Station at index {idx} missing required field: company_name"})
@@ -2745,19 +2932,19 @@ def post_bulk_setup(event):
             return build_response(400, {"error": f"Station at index {idx} missing required field: location_name"})
         if not station.get("name"):
             return build_response(400, {"error": f"Station at index {idx} missing required field: name"})
-        category = station.get("category", "").strip()
-        if category not in VALID_CATEGORY_KEYS:
-            return build_response(400, {"error": f"Station at index {idx} invalid category: {category}"})
-    
-    # Validate question configs
+        if not station.get("category", "").strip():
+            return build_response(400, {"error": f"Station at index {idx} missing required field: category"})
+
+    # Validate question configs — allow ANY category
     for idx, qc in enumerate(question_configs):
         if not qc.get("location_name"):
             return build_response(400, {"error": f"Question config at index {idx} missing required field: location_name"})
         if not qc.get("category"):
             return build_response(400, {"error": f"Question config at index {idx} missing required field: category"})
-        if qc.get("category") not in VALID_CATEGORY_KEYS:
-            return build_response(400, {"error": f"Question config at index {idx} invalid category: {qc.get('category')}"})
-    
+
+    # ==========================================
+    # Insertion (Dependency Order)
+    # ==========================================
     upload_id = str(uuid.uuid4())
     summary = {
         "resellers_created": 0, "resellers_skipped": 0,
@@ -2766,16 +2953,16 @@ def post_bulk_setup(event):
         "stations_created": 0, "stations_skipped": 0,
         "question_configs_created": 0
     }
-    
+
     reseller_keys = set()
-    company_keys = {}  # {company_name: company_key}
-    location_keys = {}  # {location_name: (company_key, location_key)}
-    
+    company_keys = {}   # {company_name: company_key}
+    location_keys = {}  # {(company_name, location_name): (company_key, location_key)}
+
     # Step 1: Create Resellers
     for reseller in resellers:
         name = reseller["name"].strip()
         key = slugify(name)
-        
+
         existing = dashboard_table.get_item(Key={"PK": f"RESELLER#{key}", "SK": "METADATA"}).get("Item")
         if existing:
             logger.info(f"Reseller '{name}' already exists, skipping")
@@ -2789,24 +2976,16 @@ def post_bulk_setup(event):
             except Exception as e:
                 logger.error(f"Failed to create reseller '{name}': {e}")
         reseller_keys.add(key)
-        
+
     # Step 2: Create Companies
     for company in companies:
         name = company["name"].strip()
         res_name = company.get("reseller_name", "").strip()
-        res_key = slugify(res_name) if res_name else "default-reseller"
-        
-        # Ensure fallback reseller exists
-        if res_key == "default-reseller" and res_key not in reseller_keys:
-            if not dashboard_table.get_item(Key={"PK": f"RESELLER#{res_key}", "SK": "METADATA"}).get("Item"):
-                dashboard_table.put_item(Item={
-                    "PK": f"RESELLER#{res_key}", "SK": "METADATA", "name": "Default Reseller", "created_at": now_iso()
-                })
-            reseller_keys.add(res_key)
-            
+        res_key = slugify(res_name)
+
         key = slugify(name)
         company_keys[name] = key
-        
+
         existing = dashboard_table.get_item(Key={"PK": f"COMPANY#{key}", "SK": "METADATA"}).get("Item")
         if existing:
             logger.info(f"Company '{name}' already exists, skipping")
@@ -2818,27 +2997,26 @@ def post_bulk_setup(event):
                 "reseller_key": res_key, "created_at": now_iso()
             })
             summary["companies_created"] += 1
-        
+
         # Link company to reseller (REQUIRED for sidebar tree)
         dashboard_table.put_item(Item={
             "PK": f"RESELLER#{res_key}",
             "SK": f"COMPANY#{key}",
             "associated_at": now_iso(),
         })
-            
+
     # Step 3: Create Locations
     for loc in locations:
         c_name = loc["company_name"].strip()
         l_name = loc["name"].strip()
-        
+
         c_key = company_keys.get(c_name)
         if not c_key:
             c_key = slugify(c_name)
-            
-        
+
         l_key = slugify(f"{l_name}-{loc.get('state', '')}") if loc.get("state") else slugify(l_name)
-        location_keys[l_name] = (c_key, l_key)
-        
+        location_keys[(c_name, l_name)] = (c_key, l_key)
+
         existing = dashboard_table.get_item(Key={"PK": f"COMPANY#{c_key}", "SK": f"LOCATION#{l_key}"}).get("Item")
         if existing:
             logger.info(f"Location '{l_name}' already exists, skipping")
@@ -2853,17 +3031,18 @@ def post_bulk_setup(event):
                 "created_at": now_iso()
             })
             summary["locations_created"] += 1
-            
+
     # Step 4: Create Stations
     for station in stations:
+        c_name = station["company_name"].strip()
         l_name = station["location_name"].strip()
         s_name = station["name"].strip()
         cat = station["category"].strip()
-        
-        c_key, l_key = location_keys.get(l_name, (slugify(station["company_name"]), slugify(l_name)))
+
+        c_key, l_key = location_keys.get((c_name, l_name), (slugify(c_name), slugify(l_name)))
         s_key = slugify(s_name)
         st_id = f"{l_key}-{cat}-{s_key}"
-        
+
         existing = dashboard_table.get_item(Key={"PK": f"LOCATION#{l_key}", "SK": f"STATION#{st_id}"}).get("Item")
         if existing:
             summary["stations_skipped"] += 1
@@ -2874,21 +3053,114 @@ def post_bulk_setup(event):
                 "company_key": c_key, "created_at": now_iso()
             })
             summary["stations_created"] += 1
-            
+
     # Step 5: Process Question Configurations
     for qc in question_configs:
-        l_name = qc["location_name"].strip()
-        c_key, l_key = location_keys.get(l_name, (None, slugify(l_name)))
+        c_name_for_qc = qc.get("company_name", "").strip()
+        l_name_qc = qc["location_name"].strip()
         
+        # Find matching location keys and company key
+        matched_lk = None
+        c_key = None
+        
+        if c_name_for_qc:
+            c_key = company_keys.get(c_name_for_qc)
+            
+        for (cn, ln), (ck, lk) in location_keys.items():
+            if ln == l_name_qc:
+                if not c_name_for_qc or cn == c_name_for_qc:
+                    matched_lk = lk
+                    c_key = ck
+                    break
+                    
+        if not matched_lk:
+            matched_lk = slugify(l_name_qc)
+        if not c_key:
+            c_key = slugify(c_name_for_qc) if c_name_for_qc else "default"
+
         dashboard_table.put_item(Item={
-            "PK": f"LOCATION#{l_key}",
+            "PK": f"LOCATION#{matched_lk}",
             "SK": f"QUESTIONS#{qc['category']}",
             "disabled_canned_ids": qc.get("disabled_canned_ids", []),
             "custom_questions": qc.get("custom_questions", []),
             "updated_at": now_iso()
         })
-        summary["question_configs_created"] += 1
         
+        # Update osha-checklist-templates overlay
+        checklist_type = CATEGORY_KEY_TO_CHECKLIST_TYPE.get(qc["category"], qc["category"])
+        
+        try:
+            overlay_resp = templates_table.get_item(Key={"tenant_id": c_key, "checklist_type": checklist_type})
+            overlay = overlay_resp.get("Item") or {}
+        except Exception as e:
+            logger.warning(f"Failed to fetch template overlay for tenant_id {c_key}, checklist_type {checklist_type}: {e}")
+            overlay = {}
+            
+        # Merge disabled canned questions
+        existing_disabled = set()
+        for x in overlay.get("disabled_items", []):
+            try:
+                val = int(x) if isinstance(x, (int, float)) or (isinstance(x, str) and x.isdigit()) else x
+            except ValueError:
+                val = x
+            existing_disabled.add(val)
+            
+        for d_id in qc.get("disabled_canned_ids", []):
+            try:
+                val = int(d_id) if str(d_id).isdigit() else d_id
+            except ValueError:
+                val = d_id
+            existing_disabled.add(val)
+            
+        # Merge custom items
+        existing_custom = overlay.get("custom_items", [])
+        existing_desc_set = {str(ci.get("description", "")).strip().lower() for ci in existing_custom}
+        
+        import time
+        import uuid
+        from decimal import Decimal
+        
+        now = now_iso()
+        
+        for idx, cq in enumerate(qc.get("custom_questions", [])):
+            desc = cq.get("text", "").strip()
+            if not desc:
+                continue
+            if desc.lower() in existing_desc_set:
+                continue
+                
+            custom_id = f"custom_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            new_custom = {
+                "id": custom_id,
+                "title": "Custom Field",
+                "description": desc,
+                "category_id": Decimal(1),
+                "is_custom": True,
+                "requires_evidence": True,
+                "answer": "",
+                "finding": "",
+                "action_item": "",
+                "responsible": "",
+                "due_date": "",
+                "evidence": []
+            }
+            existing_custom.append(new_custom)
+            existing_desc_set.add(desc.lower())
+            
+        try:
+            templates_table.put_item(Item={
+                "tenant_id": c_key,
+                "checklist_type": checklist_type,
+                "disabled_items": list(existing_disabled),
+                "custom_items": existing_custom,
+                "created_at": overlay.get("created_at", now),
+                "updated_at": now
+            })
+        except Exception as e:
+            logger.error(f"Failed to write template overlay to osha-checklist-templates: {e}")
+            
+        summary["question_configs_created"] += 1
+
     # Record Bulk Upload History
     dashboard_table.put_item(Item={
         "PK": f"UPLOAD#{upload_id}",
@@ -2901,9 +3173,9 @@ def post_bulk_setup(event):
         "summary": summary,
         "status": "COMPLETED"
     })
-    
+
     _invalidate_dashboard_cache()
-    
+
     return build_response(200, {
         "message": "Bulk upload processed successfully",
         "upload_id": upload_id,

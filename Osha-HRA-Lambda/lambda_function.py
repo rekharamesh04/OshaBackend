@@ -392,6 +392,21 @@ def create_inspection(event):
     inspection_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
 
+    # Compute final status from submitted answers
+    def _hra_compute_status(cats):
+        """Returns 'completed' if all items answered, 'in_progress' otherwise."""
+        for cat in (cats or []):
+            if not isinstance(cat, dict):
+                continue
+            for it in cat.get("items", []):
+                if not isinstance(it, dict):
+                    continue
+                if str(it.get("answer", "")).strip() == "":
+                    return "in_progress"
+        return "completed" if cats else "in_progress"
+
+    derived_status = _hra_compute_status(categories)
+
     # Build the item to save (merge session info + checklist data)
     item = {
         "inspection_id": inspection_id,
@@ -406,8 +421,15 @@ def create_inspection(event):
         "categories": categories,
         "general_results": general_results if general_results else [],
         "notes": notes,
+        "status": derived_status,
         "created_at": created_at,
+        "updated_at": created_at,
     }
+
+    # Stamp completed_at when all items were answered on first submit
+    if derived_status == "completed":
+        item["completed_at"] = created_at
+        logger.info(f"[SUBMIT] HRA inspection {inspection_id} marked completed at {created_at}")
 
     # Save to DynamoDB
     table.put_item(Item=item)
@@ -434,6 +456,8 @@ def create_inspection(event):
         "inspection_id": inspection_id,
         "session_id": session_id,
         "created_at": created_at,
+        "status": derived_status,
+        "message": "HRA inspection created.",
     })
 
 

@@ -764,12 +764,20 @@ def next_unanswered_index(inspection: dict) -> Optional[Tuple[int, int]]:
     return None
 
 def compute_status(inspection: dict) -> str:
+    """
+    Calculate inspection status.
+    Returns: "in_progress" | "completed"
+    - "in_progress" if any item has an empty answer
+    - "completed"   if all items have been answered (pass OR fail outcomes
+                    are both unified under "completed" so the dashboard and
+                    mobile API correctly mark the station as done).
+    """
     items = get_all_items(inspection)
+    if not items:
+        return "in_progress"
     if any(item.get("answer", "") == "" for item in items):
         return "in_progress"
-    if any(item.get("answer") == "No" for item in items):
-        return "failed"
-    return "passed"
+    return "completed"
 
 def prepare_image_bytes(image_bytes: bytes, content_type: str = "image/jpeg") -> Tuple[bytes, str]:
     if Image is None:
@@ -1012,6 +1020,16 @@ def create_inspection_from_session_payload(event: dict) -> dict:
         "current_item_index": 0,
         "created_at": created_at, "updated_at": updated_at,
     })
+
+    # Stamp completed_at the first time the inspection reaches "completed"
+    derived_status = record.get("status", "in_progress")
+    if derived_status == "completed" and not record.get("completed_at"):
+        record["completed_at"] = updated_at
+        logger.info(
+            "Inspection %s (eyewash) marked completed at %s",
+            inspection_id, updated_at,
+        )
+
     save_inspection(record)
 
     # Stamp shared session so Dashboard autosave can resolve the inspection table.
@@ -1037,6 +1055,7 @@ def create_inspection_from_session_payload(event: dict) -> dict:
         "inspection_id": inspection_id, "session_id": preserved_sid,
         "created_at": created_at, "updated_at": updated_at,
         "status": record.get("status", "in_progress"),
+        "message": "Inspection updated and merged successfully." if existing else "Inspection created.",
     })
 
 

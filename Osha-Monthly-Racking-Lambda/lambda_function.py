@@ -1787,14 +1787,22 @@ def merge_categories(existing_cats, incoming_cats):
 
 
 def compute_status_from_categories(inspection):
-    """Calculate inspection status: in_progress, passed, or failed."""
+    """
+    Calculate inspection status: in_progress or completed.
+    Both 'In compliance' and 'Needs maintenance' are valid answers —
+    any answered item counts as done.  The inspector is finished when
+    every item has *any* non-empty answer.
+    Returns 'completed' so the dashboard and mobile API recognise the
+    station as done (previously returned 'passed'/'failed' which the
+    dashboard does not treat as completed).
+    """
     items = get_linear_checklist_items(inspection)
     all_items = [entry["item"] for entry in items]
+    if not all_items:
+        return "in_progress"
     if any(item.get("answer", "") == "" for item in all_items):
         return "in_progress"
-    if any(item.get("answer") == "Needs maintenance" for item in all_items):
-        return "failed"
-    return "passed"
+    return "completed"
 
 
 def compute_progress(inspection):

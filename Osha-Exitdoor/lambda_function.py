@@ -797,12 +797,20 @@ def next_unanswered_index(inspection):
 
 
 def compute_status(inspection):
+    """
+    Calculate inspection status.
+    Returns: "in_progress" | "completed"
+    - "in_progress" if any item has an empty answer
+    - "completed"   if all items have been answered (pass OR fail outcomes
+                    are both unified under "completed" so the dashboard and
+                    mobile API correctly mark the station as done).
+    """
     items = get_all_items(inspection)
+    if not items:
+        return "in_progress"
     if any(item.get("answer", "") == "" for item in items):
         return "in_progress"
-    if any(item.get("answer") == "No" for item in items):
-        return "failed"
-    return "passed"
+    return "completed"
 
 
 def update_summary_items(inspection):
@@ -1219,6 +1227,9 @@ def create_inspection(event):
         if not merged_gr:
             merged_gr = copy.deepcopy(existing_gr)
 
+        derived_status = compute_status({"categories": merged_cats})
+        updated_at = now_iso()
+
         record = dict(existing)
         record.update({
             "session_id":      session_id or existing.get("session_id", ""),
@@ -1231,9 +1242,15 @@ def create_inspection(event):
             "categories":      merged_cats,
             "general_results": merged_gr,
             "notes":           notes if notes else str(existing.get("notes", "")).strip(),
-            "status":          compute_status({"categories": merged_cats}),
-            "updated_at":      now_iso(),
+            "status":          derived_status,
+            "updated_at":      updated_at,
         })
+
+        # Stamp completed_at the first time the inspection reaches "completed"
+        if derived_status == "completed" and not record.get("completed_at"):
+            record["completed_at"] = updated_at
+            logger.info(f"[SUBMIT] Inspection {inspection_id} (exit-door) marked completed at {updated_at}")
+
         save_inspection(record)
         linked_session_id = session_id or existing.get("session_id", "")
         _link_session_to_inspection(linked_session_id, inspection_id)
@@ -1241,8 +1258,8 @@ def create_inspection(event):
             "inspection_id": inspection_id,
             "session_id":    linked_session_id,
             "created_at":    existing.get("created_at", now_iso()),
-            "updated_at":    record["updated_at"],
-            "status":        record["status"],
+            "updated_at":    updated_at,
+            "status":        derived_status,
             "message":       "Inspection updated and merged successfully.",
         })
 

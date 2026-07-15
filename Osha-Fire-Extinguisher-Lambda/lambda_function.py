@@ -1411,23 +1411,29 @@ def next_unanswered_index(inspection):
 
 
 # ─────────────────────────────────────────────
-# FIX 1: compute_status — now correctly returns "failed" when any item
-# answers "No", matching File 1's production logic exactly.
+# compute_status — returns "completed" when all items are answered,
+# "in_progress" otherwise.  Both pass and fail outcomes are unified
+# under "completed" because the mobile app / dashboard only check whether
+# the inspector has finished answering every checklist item.
 # ─────────────────────────────────────────────
 def compute_status(inspection):
     """
     Calculate inspection status.
-    Returns: "in_progress" | "failed" | "passed"
-    - "in_progress" if any item has an empty answer
-    - "failed"      if all items answered but at least one is "No"
-    - "passed"      if all items answered and none are "No"
+    Returns: "in_progress" | "completed"
+    - "in_progress" if any required item has an empty answer
+    - "completed"   if all required items have been answered (regardless of pass/fail)
+
+    NOTE: Previously returned "passed"/"failed" but the dashboard and mobile
+    API (GET /api/mobile/inspection-status) only recognise "completed" to mark
+    a station as done.  Both outcomes (pass & fail) mean the inspector has
+    finished the checklist, so we unify them under "completed".
     """
     items = get_all_items(inspection)
+    if not items:
+        return "in_progress"
     if any(item.get("answer", "") == "" for item in items):
         return "in_progress"
-    if any(item.get("answer") == "No" for item in items):
-        return "failed"
-    return "passed"
+    return "completed"
 
 
 # ─────────────────────────────────────────────
@@ -2582,6 +2588,8 @@ def create_inspection(event):
         created_at   = existing.get("created_at", now_iso())
         updated_at   = now_iso()
 
+        derived_status = compute_status({"categories": merged_cats})
+
         record = dict(existing)
         record.update({
             "session_id":         session_id or existing.get("session_id", ""),
@@ -2594,9 +2602,17 @@ def create_inspection(event):
             "categories":         merged_cats,
             "general_results":    merged_gr,
             "notes":              merged_notes,
-            "status":             compute_status({"categories": merged_cats}),
+            "status":             derived_status,
             "updated_at":         updated_at,
         })
+
+        # ── Stamp completed_at the first time the inspection reaches "completed" ──
+        # This timestamp is read by GET /api/mobile/inspection-status so the
+        # mobile app can display the correct completion time.
+        if derived_status == "completed" and not record.get("completed_at"):
+            record["completed_at"] = updated_at
+            logger.info(f"[SUBMIT] Inspection {inspection_id} marked as completed at {updated_at}")
+
         save_inspection(record)
         linked_session_id = session_id or existing.get("session_id", "")
         _link_session_to_inspection(linked_session_id, inspection_id)
@@ -2605,7 +2621,7 @@ def create_inspection(event):
             "session_id":    linked_session_id,
             "created_at":    created_at,
             "updated_at":    updated_at,
-            "status":        record["status"],
+            "status":        derived_status,
             "message":       "Inspection updated and merged successfully.",
         })
 
