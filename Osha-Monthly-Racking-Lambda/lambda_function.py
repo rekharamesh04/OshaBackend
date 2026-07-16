@@ -1952,6 +1952,40 @@ def lambda_handler(event, context):
         GET  /racking/session/{id}/resume           → resume_session
         OPTIONS (any)                               → CORS preflight
     """
+    # ── JWT Security Middleware ──────────────────────────────────────────
+    # If a Cognito JWT Authorizer is attached, extract the verified
+    # company_key from the token and forcefully inject it into the event
+    # so that ALL downstream functions use the secure, verified key.
+    _claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
+    if _claims:
+        _secure_company = _claims.get("custom:company_key", "")
+        _groups = _claims.get("cognito:groups", "")
+        if isinstance(_groups, str):
+            _groups = [g.strip() for g in _groups.split(",")]
+        elif not _groups:
+            _groups = []
+
+        # SuperAdmins don't have a company_key in their token;
+        # they pass it via query params or body — that's allowed.
+        if _secure_company and "SuperAdmin" not in _groups:
+            # Overwrite query params
+            if event.get("queryStringParameters") is None:
+                event["queryStringParameters"] = {}
+            event["queryStringParameters"]["company_key"] = _secure_company
+            event["queryStringParameters"]["tenant_id"] = _secure_company
+
+            # Overwrite body
+            import json as _json
+            _raw_body = event.get("body") or "{}"
+            try:
+                _body_obj = _json.loads(_raw_body) if isinstance(_raw_body, str) else _raw_body
+                if isinstance(_body_obj, dict):
+                    _body_obj["company_key"] = _secure_company
+                    event["body"] = _json.dumps(_body_obj)
+            except Exception:
+                pass
+    # ── End JWT Security Middleware ──────────────────────────────────────
+
     http_method = event.get("httpMethod") or event.get("requestContext", {}).get("http", {}).get("method", "")
     resource = event.get("resource") or event.get("routeKey", "")
     path = event.get("path") or event.get("rawPath", "")

@@ -1429,6 +1429,26 @@ def admin_list_inspections(event):
         filter_location = str(params.get("location", "") or "").strip()
         filter_start = str(params.get("start_date", "") or "").strip()
         filter_end = str(params.get("end_date", "") or "").strip()
+        
+        # ── JWT Security & Hybrid Filtering ──
+        claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
+        enforce_security = bool(claims)
+        secure_company_key = ""
+        secure_auditor = ""
+        
+        if enforce_security:
+            secure_company_key = claims.get("custom:company_key", "")
+            
+            email = claims.get("email", "")
+            groups = claims.get("cognito:groups", "")
+            if isinstance(groups, str):
+                groups = [g.strip() for g in groups.split(",")]
+            elif not groups:
+                groups = []
+            
+            # If regular User, restrict to their own records
+            if "User" in groups and "Manager" not in groups and "Admin" not in groups and "SuperAdmin" not in groups:
+                secure_auditor = email
 
         all_inspections = []
 
@@ -1451,6 +1471,20 @@ def admin_list_inspections(event):
                         "IndexName": "LocationDateIndex",
                         "KeyConditionExpression": kce,
                     }
+                    
+                    if enforce_security:
+                        q_filters = []
+                        q_attr_vals = {}
+                        if secure_company_key:
+                            q_filters.append("company_key = :ck")
+                            q_attr_vals[":ck"] = secure_company_key
+                        if secure_auditor:
+                            q_filters.append("(auditor_name = :aud OR auditor_email = :aud)")
+                            q_attr_vals[":aud"] = secure_auditor
+                            
+                        if q_filters:
+                            query_kwargs["FilterExpression"] = " AND ".join(q_filters)
+                            query_kwargs["ExpressionAttributeValues"] = q_attr_vals
                     resp = ddb_table.query(**query_kwargs)
                     items.extend(resp.get("Items", []))
                     while "LastEvaluatedKey" in resp:
@@ -1494,6 +1528,14 @@ def admin_list_inspections(event):
                 attr_names["#loc"] = "location"
                 attr_names["#fa"] = "facility_area"
                 attr_values[":loc"] = filter_location
+                
+            if enforce_security:
+                if secure_company_key:
+                    filter_parts.append("company_key = :ck")
+                    attr_values[":ck"] = secure_company_key
+                if secure_auditor:
+                    filter_parts.append("(auditor_name = :aud OR auditor_email = :aud)")
+                    attr_values[":aud"] = secure_auditor
 
             scan_kwargs = {}
             if filter_parts:
@@ -2034,6 +2076,24 @@ def mobile_inspection_status(event):
         location_key = str(params.get("location_key", "") or "").strip()
         filter_category = str(params.get("category", "") or "").strip()
         filter_auditor = str(params.get("auditor_name", "") or "").strip()
+        
+        # ── JWT Security & Hybrid Filtering ──
+        claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
+        if claims:
+            token_company = claims.get("custom:company_key", "")
+            if token_company:
+                company_key = token_company
+            
+            email = claims.get("email", "")
+            groups = claims.get("cognito:groups", "")
+            if isinstance(groups, str):
+                groups = [g.strip() for g in groups.split(",")]
+            elif not groups:
+                groups = []
+            
+            # If regular User, restrict to their own records
+            if "User" in groups and "Manager" not in groups and "Admin" not in groups and "SuperAdmin" not in groups:
+                filter_auditor = email
 
         if not location_key:
             return build_response(400, {"error": "location_key query parameter is required"})
@@ -2047,7 +2107,12 @@ def mobile_inspection_status(event):
 
         # ── Step 1: Resolve location (fast get_item when company_key provided) ──
         t_loc = _time.monotonic()
-        location_item, company_key = _resolve_location_item(company_key, location_key)
+        location_item, resolved_company_key = _resolve_location_item(company_key, location_key)
+        
+        # Force company key from resolved if not provided in claims/params
+        if not company_key:
+            company_key = resolved_company_key
+            
         location_ms = int((_time.monotonic() - t_loc) * 1000)
 
         if not location_item:
