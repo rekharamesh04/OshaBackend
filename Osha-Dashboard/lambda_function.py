@@ -120,6 +120,10 @@ SUMMARY_ITEM_IDS = {
     "exit-door": {18, 19},
 }
 
+_ALL_SUMMARY_IDS = set()
+for v in SUMMARY_ITEM_IDS.values():
+    _ALL_SUMMARY_IDS.update(v)
+
 # ─────────────────────────────────────────────
 # Fixed Station Type Categories
 # ─────────────────────────────────────────────
@@ -1429,97 +1433,93 @@ def admin_list_inspections(event):
         all_inspections = []
 
         def _query_or_scan_table(type_label, ddb_table):
-            """Use GSI query() when location filter is present, otherwise scan with FilterExpression.
-            The LocationDateIndex GSI (PK=facility_area, SK=date_of_audit) enables
-            O(K) reads instead of O(N) full table scans."""
-            try:
-                items = []
+            items = []
+            seen_ids = set()
 
-                # FAST PATH: GSI query when location + date filters are provided
-                if filter_location and (filter_start or filter_end):
-                    try:
-                        kce = Key("facility_area").eq(filter_location)
-                        if filter_start and filter_end:
-                            kce = kce & Key("date_of_audit").between(filter_start, filter_end)
-                        elif filter_start:
-                            kce = kce & Key("date_of_audit").gte(filter_start)
-                        else:
-                            kce = kce & Key("date_of_audit").lte(filter_end)
+            # FAST PATH: GSI query when location + date filters are provided
+            if filter_location and (filter_start or filter_end):
+                try:
+                    kce = Key("facility_area").eq(filter_location)
+                    if filter_start and filter_end:
+                        kce = kce & Key("date_of_audit").between(filter_start, filter_end)
+                    elif filter_start:
+                        kce = kce & Key("date_of_audit").gte(filter_start)
+                    else:
+                        kce = kce & Key("date_of_audit").lte(filter_end)
 
-                        query_kwargs = {
-                            "IndexName": "LocationDateIndex",
-                            "KeyConditionExpression": kce,
-                        }
+                    query_kwargs = {
+                        "IndexName": "LocationDateIndex",
+                        "KeyConditionExpression": kce,
+                    }
+                    resp = ddb_table.query(**query_kwargs)
+                    items.extend(resp.get("Items", []))
+                    while "LastEvaluatedKey" in resp:
+                        query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
                         resp = ddb_table.query(**query_kwargs)
                         items.extend(resp.get("Items", []))
-                        while "LastEvaluatedKey" in resp:
-                            query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
-                            resp = ddb_table.query(**query_kwargs)
-                            items.extend(resp.get("Items", []))
 
-                        items = convert_decimals(items)
-                        logger.info(f"[ADMIN] GSI query {type_label}: {len(items)} items")
-                        if items:
-                            return [(item, type_label) for item in items]
-                        else:
-                            logger.info(
-                                f"[ADMIN] GSI returned 0 for facility_area='{filter_location}' "
-                                f"on {type_label}, falling back to scan"
-                            )
-                    except ddb_table.meta.client.exceptions.ResourceNotFoundException:
-                        logger.warning(f"[ADMIN] LocationDateIndex not found on {type_label}, falling back to scan")
-                    except Exception as gsi_err:
-                        err_code = getattr(gsi_err, "response", {}).get("Error", {}).get("Code", "")
-                        if err_code == "ValidationException" and "LocationDateIndex" in str(gsi_err):
-                            logger.warning(f"[ADMIN] LocationDateIndex not ready on {type_label}, falling back to scan")
-                        else:
-                            raise
+                    items = convert_decimals(items)
+                    seen_ids = {str(i.get("inspection_id", "")) for i in items if i.get("inspection_id")}
+                    logger.info(f"[ADMIN] GSI query {type_label}: {len(items)} items")
+                except Exception as gsi_err:
+                    err_code = getattr(gsi_err, "response", {}).get("Error", {}).get("Code", "")
+                    if err_code == "ValidationException" and "LocationDateIndex" in str(gsi_err):
+                        logger.warning(f"[ADMIN] LocationDateIndex not ready on {type_label}")
+                    elif hasattr(gsi_err, 'response') and gsi_err.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                        logger.warning(f"[ADMIN] LocationDateIndex not found on {type_label}")
+                    else:
+                        logger.warning(f"[ADMIN] GSI query failed on {type_label}: {gsi_err}")
 
-                # FALLBACK: scan with FilterExpression
-                filter_parts = []
-                attr_names = {}
-                attr_values = {}
+            # ALWAYS scan for inspections matching by `location` field
+            filter_parts = []
+            attr_names = {}
+            attr_values = {}
 
-                if filter_start and filter_end:
-                    filter_parts.append("#doa BETWEEN :ds AND :de")
-                    attr_names["#doa"] = "date_of_audit"
-                    attr_values[":ds"] = filter_start
-                    attr_values[":de"] = filter_end
-                elif filter_start:
-                    filter_parts.append("#doa >= :ds")
-                    attr_names["#doa"] = "date_of_audit"
-                    attr_values[":ds"] = filter_start
-                elif filter_end:
-                    filter_parts.append("#doa <= :de")
-                    attr_names["#doa"] = "date_of_audit"
-                    attr_values[":de"] = filter_end
+            if filter_start and filter_end:
+                filter_parts.append("#doa BETWEEN :ds AND :de")
+                attr_names["#doa"] = "date_of_audit"
+                attr_values[":ds"] = filter_start
+                attr_values[":de"] = filter_end
+            elif filter_start:
+                filter_parts.append("#doa >= :ds")
+                attr_names["#doa"] = "date_of_audit"
+                attr_values[":ds"] = filter_start
+            elif filter_end:
+                filter_parts.append("#doa <= :de")
+                attr_names["#doa"] = "date_of_audit"
+                attr_values[":de"] = filter_end
 
-                if filter_location:
-                    filter_parts.append("(#loc = :loc OR #fa = :loc)")
-                    attr_names["#loc"] = "location"
-                    attr_names["#fa"] = "facility_area"
-                    attr_values[":loc"] = filter_location
+            if filter_location:
+                filter_parts.append("(#loc = :loc OR #fa = :loc)")
+                attr_names["#loc"] = "location"
+                attr_names["#fa"] = "facility_area"
+                attr_values[":loc"] = filter_location
 
-                scan_kwargs = {}
-                if filter_parts:
-                    scan_kwargs["FilterExpression"] = " AND ".join(filter_parts)
-                    scan_kwargs["ExpressionAttributeNames"] = attr_names
-                    scan_kwargs["ExpressionAttributeValues"] = attr_values
+            scan_kwargs = {}
+            if filter_parts:
+                scan_kwargs["FilterExpression"] = " AND ".join(filter_parts)
+                scan_kwargs["ExpressionAttributeNames"] = attr_names
+                scan_kwargs["ExpressionAttributeValues"] = attr_values
 
-                items = []
+            scan_items = []
+            resp = ddb_table.scan(**scan_kwargs)
+            scan_items.extend(resp.get("Items", []))
+            while "LastEvaluatedKey" in resp:
+                scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
                 resp = ddb_table.scan(**scan_kwargs)
-                items.extend(resp.get("Items", []))
-                while "LastEvaluatedKey" in resp:
-                    scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
-                    resp = ddb_table.scan(**scan_kwargs)
-                    items.extend(resp.get("Items", []))
+                scan_items.extend(resp.get("Items", []))
 
-                items = convert_decimals(items)
-                logger.info(f"[ADMIN] Scanned {type_label}: {len(items)} items (filtered server-side)")
-                return [(item, type_label) for item in items]
-            except Exception as e:
-                logger.error(f"Error scanning table for {type_label}: {str(e)}")
-                return []
+            scan_items = convert_decimals(scan_items)
+            
+            # Deduplicate: scan may re-find items the GSI already returned
+            for item in scan_items:
+                iid = str(item.get("inspection_id", ""))
+                if iid and iid not in seen_ids:
+                    items.append(item)
+                    seen_ids.add(iid)
+
+            logger.info(f"[ADMIN] {type_label}: {len(items)} total (GSI+scan deduplicated)")
+            return [(item, type_label) for item in items]
 
         with ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
@@ -1546,8 +1546,9 @@ def admin_list_inspections(event):
                 # only when the computed result is ambiguous.  This ensures a fully
                 # answered inspection always shows "completed" on the dashboard
                 # even if its stored status field was never updated (stale record).
-                computed_status = compute_inspection_status(categories, general_results)
-                if computed_status == "completed":
+                inspection_type = next((k for k, v in INSPECTION_TYPE_TO_LABEL.items() if v == type_label), "")
+                computed_status = compute_inspection_status(categories, general_results, inspection_type)
+                if computed_status == "completed" or stored_status == "completed":
                     status = "completed"
                 elif stored_status in ("paused", "in_progress"):
                     status = stored_status
@@ -1598,8 +1599,9 @@ def admin_list_inspections(event):
         return build_response(500, {"error": f"Internal error: {str(e)}"})
 
 
-def compute_inspection_status(categories, general_results):
+def compute_inspection_status(categories, general_results, inspection_type=""):
     """Calculate inspection status: completed, in_progress, pending, or overdue."""
+    skip_ids = SUMMARY_ITEM_IDS.get(inspection_type, _ALL_SUMMARY_IDS)
     answered = 0
     total = 0
     if not isinstance(categories, list):
@@ -1610,8 +1612,8 @@ def compute_inspection_status(categories, general_results):
         for item in cat.get("items", []):
             if not isinstance(item, dict):
                 continue
-            iid = item.get("id")
-            if isinstance(iid, int) and iid in (11, 12):
+            iid = _numeric_id(item.get("id"))
+            if iid is not None and iid in skip_ids:
                 continue
             total += 1
             answer = str(item.get("answer") or "").strip()
@@ -1643,8 +1645,9 @@ def count_evidence(categories):
     return count
 
 
-def compute_progress(categories):
+def compute_progress(categories, inspection_type=""):
     """Compute completion progress for an inspection's categories."""
+    skip_ids = SUMMARY_ITEM_IDS.get(inspection_type, _ALL_SUMMARY_IDS)
     total = 0
     answered = 0
     if not isinstance(categories, list):
@@ -1655,9 +1658,8 @@ def compute_progress(categories):
         for item in cat.get("items", []):
             if not isinstance(item, dict):
                 continue
-            iid = item.get("id")
-            # Skip auto-calculated summary items (fire extinguisher items 11, 12)
-            if isinstance(iid, int) and iid in (11, 12):
+            iid = _numeric_id(item.get("id"))
+            if iid is not None and iid in skip_ids:
                 continue
             total += 1
             if str(item.get("answer") or "").strip():
@@ -2113,6 +2115,7 @@ def mobile_inspection_status(event):
             GSI query reads only matching records — O(K) instead of O(N)."""
             try:
                 items = []
+                seen_ids = set()
 
                 # FAST PATH: GSI query by facility_area + date range
                 if location_name:
@@ -2130,21 +2133,22 @@ def mobile_inspection_status(event):
                             resp = ddb_table.query(**query_kwargs)
                             items.extend(resp.get("Items", []))
 
-                        if items:
-                            return [(convert_decimals(item), type_label) for item in items]
-                        else:
-                            logger.info(
-                                f"[MOBILE] GSI returned 0 for facility_area='{location_name}' "
-                                f"on {type_label}, falling back to scan"
-                            )
+                        items = convert_decimals(items)
+                        seen_ids = {str(i.get("inspection_id", "")) for i in items if i.get("inspection_id")}
+                        logger.info(f"[MOBILE] GSI query {type_label}: {len(items)} items")
                     except Exception as gsi_err:
                         err_code = getattr(gsi_err, "response", {}).get("Error", {}).get("Code", "")
                         if err_code == "ValidationException" and "LocationDateIndex" in str(gsi_err):
-                            logger.warning(f"[MOBILE] LocationDateIndex not ready on {type_label}, falling back to scan")
+                            logger.warning(f"[MOBILE] LocationDateIndex not ready on {type_label}")
+                        elif hasattr(gsi_err, 'response') and gsi_err.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                            logger.warning(f"[MOBILE] LocationDateIndex not found on {type_label}")
                         else:
-                            raise
+                            logger.warning(f"[MOBILE] GSI query failed on {type_label}: {gsi_err}")
 
-                # FALLBACK: scan with FilterExpression
+                # ALWAYS scan for inspections matching by `location` field
+                # (catches inspections where facility_area ≠ location_name,
+                #  which is the normal case: facility_area stores the category
+                #  name like "Fire Extinguisher", not the location name)
                 scan_kwargs = {
                     "FilterExpression": Attr("date_of_audit").between(
                         month_start_str, month_end_str
@@ -2154,12 +2158,22 @@ def mobile_inspection_status(event):
                     ),
                 }
                 resp = ddb_table.scan(**scan_kwargs)
-                items.extend(resp.get("Items", []))
+                scan_items = convert_decimals(resp.get("Items", []))
                 while "LastEvaluatedKey" in resp:
                     scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
                     resp = ddb_table.scan(**scan_kwargs)
-                    items.extend(resp.get("Items", []))
-                return [(convert_decimals(item), type_label) for item in items]
+                    scan_items.extend(convert_decimals(resp.get("Items", [])))
+
+                # Deduplicate: scan may re-find items the GSI already returned
+                for item in scan_items:
+                    iid = str(item.get("inspection_id", ""))
+                    if iid and iid not in seen_ids:
+                        items.append(item)
+                        seen_ids.add(iid)
+
+                logger.info(f"[MOBILE] {type_label}: {len(items)} total (GSI+scan deduplicated)")
+                return [(item, type_label) for item in items]
+
             except Exception as e:
                 logger.error(f"[MOBILE] Error scanning {type_label}: {str(e)}")
                 return []
@@ -2233,13 +2247,44 @@ def mobile_inspection_status(event):
                 # Try to match by station_id first, then by station name
                 insp_station_id = str(raw.get("station_id") or "").strip()
                 insp_station_name = str(raw.get("station") or "").strip()
+                insp_session_id = str(raw.get("session_id") or "").strip()
 
                 matched_station_id = None
                 if insp_station_id and insp_station_id in station_id_set:
                     matched_station_id = insp_station_id
                 elif insp_station_name:
-                    # Fallback: O(1) dict lookup by station name (was O(N) loop)
+                    # Exact match first
                     matched_station_id = station_name_to_id.get(insp_station_name.lower())
+
+                    # Normalized fallback: strip whitespace, normalize dashes/hyphens
+                    if not matched_station_id:
+                        import unicodedata
+                        import re
+                        def _normalize_station(name):
+                            # Replace all dash-like characters with ASCII hyphen
+                            n = unicodedata.normalize("NFKC", name.lower().strip())
+                            n = re.sub(r"[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]", "-", n)
+                            n = re.sub(r"\s+", " ", n)
+                            return n
+                        norm_name = _normalize_station(insp_station_name)
+                        for sname, sid in station_name_to_id.items():
+                            if _normalize_station(sname) == norm_name:
+                                matched_station_id = sid
+                                break
+
+                    # Session-ID fallback: match via session table
+                    if not matched_station_id and insp_session_id:
+                        try:
+                            sess = session_table.get_item(
+                                Key={"session_id": insp_session_id},
+                                ProjectionExpression="station_id",
+                            ).get("Item")
+                            if sess:
+                                sid_from_session = str(sess.get("station_id", "")).strip()
+                                if sid_from_session and sid_from_session in station_id_set:
+                                    matched_station_id = sid_from_session
+                        except Exception:
+                            pass
 
                 if not matched_station_id:
                     continue
@@ -2253,8 +2298,10 @@ def mobile_inspection_status(event):
                 general_results = raw.get("general_results") or []
                 stored_status = str(raw.get("status") or "").strip()
 
-                computed = compute_inspection_status(categories, general_results)
-                if computed == "completed":
+                inspection_type = next((k for k, v in INSPECTION_TYPE_TO_LABEL.items() if v == type_label), "")
+                computed = compute_inspection_status(categories, general_results, inspection_type)
+                
+                if computed == "completed" or stored_status == "completed":
                     # All items answered → inspection is done, regardless of stored_status
                     status = "completed"
                 elif stored_status in ("paused", "in_progress"):

@@ -1405,6 +1405,8 @@ def next_unanswered_index(inspection):
     for cat_idx, cat in enumerate(inspection.get("categories", [])):
         for item_idx, item in enumerate(cat.get("items", [])):
             iid = _numeric_item_id(item)
+            if iid in (11, 12):
+                continue
             if not item.get("answer", "").strip() or item.get("blocked_by_wrong_image"):
                 return cat_idx, item_idx
     return None
@@ -1429,9 +1431,10 @@ def compute_status(inspection):
     finished the checklist, so we unify them under "completed".
     """
     items = get_all_items(inspection)
-    if not items:
+    valid_items = [i for i in items if _numeric_item_id(i) not in (11, 12)]
+    if not valid_items:
         return "in_progress"
-    if any(item.get("answer", "") == "" for item in items):
+    if any(item.get("answer", "") == "" for item in valid_items):
         return "in_progress"
     return "completed"
 
@@ -2811,6 +2814,20 @@ def update_checklist_item(event):
     inspection["categories"][cat_idx]["items"][item_idx] = checklist_item
     update_summary_items(inspection)
     inspection["status"] = compute_status(inspection)
+    
+    # ── Compute flat current_item_index ──
+    flat_idx = 0
+    current_idx = None
+    for cat in inspection.get("categories", []):
+        for item in cat.get("items", []):
+            iid = _numeric_item_id(item)
+            if iid in (11, 12):
+                continue
+            if current_idx is None and not item.get("answer", "").strip():
+                current_idx = flat_idx
+            flat_idx += 1
+    inspection["current_item_index"] = current_idx if current_idx is not None else flat_idx
+
     inspection["updated_at"] = now_iso()
     save_inspection(inspection)
 
@@ -4143,6 +4160,8 @@ def compute_progress(inspection):
     for cat in inspection.get("categories", []):
         for item in cat.get("items", []):
             iid = _numeric_item_id(item)
+            if iid in (11, 12):
+                continue
             total += 1
             if item.get("answer", "").strip():
                 answered += 1
@@ -4155,6 +4174,8 @@ def find_next_unanswered(inspection):
     for cat in inspection.get("categories", []):
         for item in cat.get("items", []):
             iid = _numeric_item_id(item)
+            if iid in (11, 12):
+                continue
             if not item.get("answer", "").strip():
                 return item.get("id")
     return None
@@ -4243,9 +4264,25 @@ def resume_session(event):
         progress = compute_progress(inspection)
         next_item_id = find_next_unanswered(inspection)
 
+        # ── Compute current_item_index for frontend ──────────────────
+        flat_idx = 0
+        current_idx = None
+        for cat in inspection.get("categories", []):
+            for item in cat.get("items", []):
+                iid = _numeric_item_id(item)
+                if iid in (11, 12):
+                    continue
+                if current_idx is None and not item.get("answer", "").strip():
+                    current_idx = flat_idx
+                flat_idx += 1
+        
+        if current_idx is None:
+            current_idx = flat_idx # Default to end if all answered
+
         # ── Update inspection record ─────────────────────────────────
         ts = now_iso()
         inspection["status"] = "in_progress"
+        inspection["current_item_index"] = current_idx
         inspection["resumed_at"] = ts
         inspection["updated_at"] = ts
         save_inspection(inspection)
