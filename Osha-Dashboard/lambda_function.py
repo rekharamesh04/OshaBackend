@@ -1581,6 +1581,27 @@ def admin_list_inspections(event):
                 date_of_audit = str(raw.get("date_of_audit") or "")
                 location = str(raw.get("location") or "")
                 facility_area = str(raw.get("facility_area") or "")
+                auditor_name = str(raw.get("auditor_name") or "")
+                company_key = str(raw.get("company_key") or raw.get("company") or "")
+
+                # Fallback: fetch missing metadata from the session table
+                if not auditor_name or not facility_area or not date_of_audit or not company_key:
+                    sid = raw.get("session_id")
+                    if sid:
+                        try:
+                            sess = session_table.get_item(Key={"session_id": sid}).get("Item", {})
+                            if not auditor_name:
+                                auditor_name = str(sess.get("auditor_name") or "")
+                            if not facility_area:
+                                facility_area = str(sess.get("facility_area") or "")
+                            if not date_of_audit:
+                                date_of_audit = str(sess.get("date_of_audit") or "")
+                            if not location:
+                                location = str(sess.get("location") or "")
+                            if not company_key:
+                                company_key = str(sess.get("company_key") or "")
+                        except Exception:
+                            pass
 
                 stored_status = str(raw.get("status") or "").strip()
 
@@ -1611,7 +1632,8 @@ def admin_list_inspections(event):
                     "station": str(raw.get("station") or ""),
                     "type": type_label,
                     "date": date_of_audit,
-                    "inspector": str(raw.get("auditor_name") or ""),
+                    "inspector": auditor_name,
+                    "company": company_key,
                     "evidence_count": evidence,
                     "status": status,
                     "created_at": str(raw.get("created_at") or ""),

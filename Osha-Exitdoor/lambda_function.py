@@ -684,7 +684,7 @@ def deep_copy_checklist(tenant_id="default"):
 # ═══════════════════════════════════════════════════════════════
 
 def load_inspection(inspection_id):
-    result = table.get_item(Key={"inspection_id": inspection_id})
+    result = table.get_item(Key={"inspection_id": inspection_id}, ConsistentRead=True)
     item = result.get("Item")
     return convert_decimals(item) if item else None
 
@@ -698,7 +698,7 @@ def load_inspection_by_session_id(session_id: str):
     if not session_id:
         return None
     try:
-        session_resp = sessions_table.get_item(Key={"session_id": session_id})
+        session_resp = sessions_table.get_item(Key={"session_id": session_id}, ConsistentRead=True)
         session = session_resp.get("Item")
         if session:
             inspection_id = str(session.get("inspection_id", "")).strip()
@@ -1173,7 +1173,7 @@ def create_inspection(event):
     def _load_session():
         if session_id:
             try:
-                r = sessions_table.get_item(Key={"session_id": session_id})
+                r = sessions_table.get_item(Key={"session_id": session_id}, ConsistentRead=True)
                 return r.get("Item")
             except Exception:
                 return None
@@ -1245,6 +1245,7 @@ def create_inspection(event):
             "notes":           notes if notes else str(existing.get("notes", "")).strip(),
             "status":          derived_status,
             "updated_at":      updated_at,
+            "company_key":     str(body.get("company_key", existing.get("company_key", ""))).strip(),
         })
 
         # Stamp completed_at the first time the inspection reaches "completed"
@@ -1285,6 +1286,7 @@ def create_inspection(event):
         "current_item_index": 0,
         "created_at":         created_at,
         "updated_at":         created_at,
+        "company_key":        str(body.get("company_key", "")).strip(),
     }
     save_inspection(record)
     _link_session_to_inspection(session_id, inspection_id)

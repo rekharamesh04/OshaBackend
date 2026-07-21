@@ -1288,7 +1288,7 @@ def validate_extinguisher_height(qr_data: dict) -> Tuple[bool, str, str, str]:
 
 def load_inspection(inspection_id):
     """Load an inspection record from DynamoDB and convert decimals."""
-    result = table.get_item(Key={"inspection_id": inspection_id})
+    result = table.get_item(Key={"inspection_id": inspection_id}, ConsistentRead=True)
     item = result.get("Item")
     if item:
         return convert_decimals(item)
@@ -1311,7 +1311,7 @@ def load_inspection_by_session_id(session_id: str):
         return None
     # Fast path: look up session record to get inspection_id directly
     try:
-        session_resp = sessions_table.get_item(Key={"session_id": session_id})
+        session_resp = sessions_table.get_item(Key={"session_id": session_id}, ConsistentRead=True)
         session = session_resp.get("Item")
         if session:
             inspection_id = str(session.get("inspection_id", "")).strip()
@@ -2601,6 +2601,7 @@ def create_inspection(event):
             "date_of_audit":      date_of_audit or existing.get("date_of_audit", ""),
             "location":           location      or existing.get("location",      ""),
             "station":            station       or existing.get("station",       ""),
+            "company_key":        str(body.get("company_key", existing.get("company_key", ""))).strip(),
             "team":               merged_team,
             "categories":         merged_cats,
             "general_results":    merged_gr,
@@ -2642,6 +2643,7 @@ def create_inspection(event):
         "location":           location,
         "station":            station,
         "station_id":         station_id,
+        "company_key":        str(body.get("company_key", "")).strip(),
         "team":               team if team else [],
         "categories":         categories,
         "general_results":    general_results if general_results else [],

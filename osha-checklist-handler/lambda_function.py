@@ -407,6 +407,7 @@ def create_session(event):
         "location": location,
         "station": station,
         "station_id": station_id,
+        "company_key": str(body.get("company_key", "")).strip(),
         "created_at": created_at,
     }
 
@@ -531,6 +532,7 @@ def create_inspection(event):
         "location": session.get("location", ""),
         "station": session.get("station", ""),
         "station_id": session.get("station_id", ""),
+        "company_key": str(body.get("company_key", "")).strip(),
         "categories": categories,
         "general_results": general_results if general_results else [],
         "notes": notes,
@@ -623,7 +625,7 @@ def get_inspection(event):
     company_key = str(params.get("company_key", params.get("tenant_id", ""))).strip()
 
     # Fetch from DynamoDB
-    result = table.get_item(Key={"inspection_id": inspection_id})
+    result = table.get_item(Key={"inspection_id": inspection_id}, ConsistentRead=True)
     item = result.get("Item")
 
     if not item:

@@ -411,6 +411,7 @@ def create_inspection(event):
     item = {
         "inspection_id": inspection_id,
         "session_id": session_id,
+        "company_key": str(body.get("company_key", "")).strip(),
         "auditor_name": session.get("auditor_name", ""),
         "location": session.get("location", ""),
         "facility_area": session.get("facility_area", ""),
@@ -520,7 +521,7 @@ def get_inspection(event):
     company_key = str(params.get("company_key", params.get("tenant_id", ""))).strip()
 
     # Fetch from DynamoDB
-    result = table.get_item(Key={"inspection_id": inspection_id})
+    result = table.get_item(Key={"inspection_id": inspection_id}, ConsistentRead=True)
     item = result.get("Item")
 
     if not item:

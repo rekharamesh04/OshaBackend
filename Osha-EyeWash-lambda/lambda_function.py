@@ -799,7 +799,7 @@ def prepare_image_bytes(image_bytes: bytes, content_type: str = "image/jpeg") ->
 
 # ── DynamoDB helpers ───────────────────────────────────────────────────────────
 def load_inspection(inspection_id: str) -> Optional[dict]:
-    resp = inspection_table.get_item(Key={"inspection_id": inspection_id})
+    resp = inspection_table.get_item(Key={"inspection_id": inspection_id}, ConsistentRead=True)
     item = resp.get("Item")
     return convert_floats_to_decimal(item) if item else None
 
@@ -808,7 +808,7 @@ def load_inspection_by_session(session_id: str) -> Optional[dict]:
     if not session_id:
         return None
     try:
-        session = session_table.get_item(Key={"session_id": session_id}).get("Item")
+        session = session_table.get_item(Key={"session_id": session_id}, ConsistentRead=True).get("Item")
     except Exception:
         return None
     if not session:
@@ -1006,6 +1006,7 @@ def create_inspection_from_session_payload(event: dict) -> dict:
 
     record = copy.deepcopy(existing) if existing else {}
     record.update({
+        "company_key": str(body.get("company_key", existing.get("company_key", "") if existing else "")).strip(),
         "inspection_id": inspection_id, "session_id": preserved_sid,
         "inspection_type": "eyewash",
         "auditor_name": session.get("auditor_name", ""),

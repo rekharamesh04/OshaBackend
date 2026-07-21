@@ -563,7 +563,7 @@ def load_inspection(inspection_id):
     inspection_id = str(inspection_id or "").strip()
     if not inspection_id:
         return None
-    result = table.get_item(Key={"inspection_id": inspection_id})
+    result = table.get_item(Key={"inspection_id": inspection_id}, ConsistentRead=True)
     item = result.get("Item")
     if item:
         return convert_decimals(item)
@@ -1602,6 +1602,7 @@ def create_inspection(event):
         "general_results": general_results if general_results else [],
         "notes": notes,
         "created_at": created_at,
+        "company_key": str(body.get("company_key", "")).strip(),
     }
 
     item["status"] = "in_progress"
@@ -1698,7 +1699,7 @@ def get_inspection(event):
     company_key = str(params.get("company_key", params.get("tenant_id", ""))).strip()
 
     # Fetch from DynamoDB
-    result = table.get_item(Key={"inspection_id": inspection_id})
+    result = table.get_item(Key={"inspection_id": inspection_id}, ConsistentRead=True)
     item = result.get("Item")
 
     if not item:
