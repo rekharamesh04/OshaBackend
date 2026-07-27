@@ -12,6 +12,7 @@ Endpoints:
 
     --- Bulk Excel Onboarding ---
     GET    /api/bulk-setup/template                           → Download blank Excel template
+    GET    /api/bulk-setup/canned-questions                   → Download read-only canned questions reference Excel
     POST   /api/bulk-setup                                    → Bulk create entities from uploaded Excel
     GET    /api/bulk-uploads?company_key={ck}                 → List upload history for company
     GET    /api/bulk-uploads/{upload_id}/download             → Download original uploaded Excel file
@@ -2745,6 +2746,54 @@ def get_bulk_template(event):
         })
 
 
+def get_canned_questions_excel(event):
+    """
+    GET /api/bulk-setup/canned-questions — Download read-only canned questions
+    reference Excel from S3 (one sheet per inspection category).
+    """
+    s3_key = "templates/canned_questions_reference.xlsx"
+    file_name = "canned_questions_reference.xlsx"
+
+    try:
+        logger.info(f"Fetching canned questions Excel from S3: {BULK_UPLOAD_BUCKET}/{s3_key}")
+
+        # Confirm object exists before issuing a presigned URL
+        s3_client.head_object(Bucket=BULK_UPLOAD_BUCKET, Key=s3_key)
+
+        response_url = s3_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": BULK_UPLOAD_BUCKET, "Key": s3_key},
+            ExpiresIn=3600,
+        )
+
+        logger.info("Generated presigned URL for canned questions Excel")
+
+        return build_response(200, {
+            "template_url": response_url,
+            "expires_in": 3600,
+            "file_name": file_name,
+        })
+    except s3_client.exceptions.ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code in ("404", "NoSuchKey", "NotFound"):
+            logger.error(f"Canned questions file not found in S3: {BULK_UPLOAD_BUCKET}/{s3_key}")
+            return build_response(404, {
+                "error": "Canned questions file not found",
+                "message": f"Please upload file to s3://{BULK_UPLOAD_BUCKET}/{s3_key}",
+            })
+        logger.error(f"Failed to fetch canned questions Excel from S3: {str(e)}")
+        return build_response(500, {
+            "error": "Failed to download canned questions",
+            "message": str(e),
+        })
+    except Exception as e:
+        logger.error(f"Failed to fetch canned questions Excel from S3: {str(e)}")
+        return build_response(500, {
+            "error": "Failed to download canned questions",
+            "message": str(e),
+        })
+
+
 def post_bulk_setup(event):
     """
     POST /api/bulk-setup — Bulk create entities from uploaded Excel file
@@ -3465,6 +3514,13 @@ def lambda_handler(event, context):
             or path.rstrip("/") == "/api/bulk-setup/template"
         ):
             return get_bulk_template(event)
+
+        # ── GET /api/bulk-setup/canned-questions ──
+        elif http_method == "GET" and (
+            resource == "/api/bulk-setup/canned-questions"
+            or path.rstrip("/") == "/api/bulk-setup/canned-questions"
+        ):
+            return get_canned_questions_excel(event)
 
         # ── POST /api/bulk-setup ──
         elif http_method == "POST" and (
