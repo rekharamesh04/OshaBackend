@@ -1213,9 +1213,8 @@ def add_custom_item(event):
     company_key = str(body.get("company_key", body.get("tenant_id", ""))).strip()
     category_id = body.get("category_id")
     description = str(body.get("description", "")).strip()
-    requires_evidence = body.get("requires_evidence", True)
-    if not isinstance(requires_evidence, bool):
-        requires_evidence = True
+    # Custom questions are evidence-off by product decision (no AI path for custom items).
+    requires_evidence = False
 
     if not company_key:
         return build_response(400, {"error": "company_key is required"})

@@ -3319,7 +3319,7 @@ def post_bulk_setup(event):
                 "description": desc,
                 "category_id": Decimal(1),
                 "is_custom": True,
-                "requires_evidence": True,
+                "requires_evidence": False,
                 "answer": "",
                 "finding": "",
                 "action_item": "",

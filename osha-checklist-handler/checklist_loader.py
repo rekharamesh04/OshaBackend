@@ -125,6 +125,8 @@ def _apply_overlay(default_template, overlay):
             custom_id = str(custom_copy.get("id", ""))
             custom_copy["is_enabled"] = custom_id not in disabled_custom_set
             custom_copy["is_custom"] = True
+            # Custom questions do not support evidence upload / AI analysis.
+            custom_copy["requires_evidence"] = False
             if "title" not in custom_copy:
                 custom_copy["title"] = "Custom Field"
 
