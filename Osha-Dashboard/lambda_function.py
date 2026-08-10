@@ -88,6 +88,7 @@ inspection_tables = {
     "Exit Door":          dynamodb.Table(os.getenv("EXIT_DOOR_TABLE", "osha-exit-door-inspections")),
     "Monthly Racking":    dynamodb.Table(os.getenv("RACKING_TABLE", "osha-racking-inspections")),
     "Quarterly HRA":      dynamodb.Table(os.getenv("HRA_TABLE", "osha-hra-inspections")),
+    "Vehicle Inspection": dynamodb.Table(os.getenv("VEHICLE_TABLE", "osha-vehicle-inspections")),
 }
 
 # Centralized session table (shared across all inspection types)
@@ -103,6 +104,7 @@ CATEGORY_TO_INSPECTION_TYPE = {
     "racking": "racking",
     "hra": "hra",
     "recordkeeping": "recordkeeping",
+    "vehicle": "vehicle-inspection",
 }
 
 # Maps inspection_type (session table) → inspection_tables label
@@ -113,6 +115,7 @@ INSPECTION_TYPE_TO_LABEL = {
     "racking": "Monthly Racking",
     "hra": "Quarterly HRA",
     "recordkeeping": "Recordkeeping",
+    "vehicle-inspection": "Vehicle Inspection",
 }
 
 # Auto-calculated summary items to skip during progress/next-item computation
@@ -135,6 +138,7 @@ STATION_TYPES = [
     {"key": "racking",       "label": "Monthly Racking",    "icon": "fa-th-large"},
     {"key": "hra",           "label": "Quarterly HRA",      "icon": "fa-clipboard-list"},
     {"key": "recordkeeping", "label": "Recordkeeping",      "icon": "fa-folder-open"},
+    {"key": "vehicle",       "label": "Vehicle Inspection", "icon": "fa-truck"},
 ]
 
 VALID_CATEGORY_KEYS = {st["key"] for st in STATION_TYPES}
@@ -146,6 +150,7 @@ CATEGORY_KEY_TO_CHECKLIST_TYPE = {
     "racking": "racking",
     "hra": "hra",
     "recordkeeping": "recordkeeping",
+    "vehicle": "vehicle-inspection",
 }
 
 STATION_QR_TYPE = "OSHA_STATION"
@@ -402,7 +407,7 @@ def _extract_location_key_from_station_id(station_id):
     """Extract location_key from station_id format: {location_key}-{type_key}-{6hex}.
     Returns None if the format is unrecognized."""
     type_keys = sorted(
-        ["eyewash", "fire", "exitdoor", "racking", "hra", "recordkeeping"],
+        ["eyewash", "fire", "exitdoor", "racking", "hra", "recordkeeping", "vehicle"],
         key=len, reverse=True,
     )
     if not station_id or len(station_id) < 8:
@@ -2072,6 +2077,7 @@ TYPEKEY_TO_INSPECTION_LABEL = {
     "racking":       "Monthly Racking",
     "hra":           "Quarterly HRA",
     "recordkeeping": "Recordkeeping",
+    "vehicle":       "Vehicle Inspection",
 }
 
 

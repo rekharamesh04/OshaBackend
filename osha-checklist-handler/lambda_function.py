@@ -905,7 +905,7 @@ def delete_inspection(event):
 
 VALID_CHECKLIST_TYPES = {
     "fire-extinguisher", "eyewash", "exit-door",
-    "racking", "hra", "recordkeeping",
+    "racking", "hra", "recordkeeping", "vehicle-inspection",
 }
 
 
