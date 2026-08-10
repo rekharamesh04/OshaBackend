@@ -447,6 +447,34 @@ def handle_resend_invite(event, user_pool_id, groups, caller_company_key):
             DesiredDeliveryMediums=["EMAIL"],
         )
 
+        # 3. Ensure required 'profile' attribute exists (older users may be missing it)
+        if not attrs.get("profile"):
+            # Determine user's group to set as profile
+            user_groups = []
+            try:
+                group_resp = cognito.admin_list_groups_for_user(
+                    UserPoolId=user_pool_id,
+                    Username=email,
+                )
+                user_groups = [g["GroupName"] for g in group_resp.get("Groups", [])]
+            except Exception:
+                pass
+
+            profile_value = "User"
+            for role in ["SuperAdmin", "Admin", "Manager", "User"]:
+                if role in user_groups:
+                    profile_value = role
+                    break
+
+            cognito.admin_update_user_attributes(
+                UserPoolId=user_pool_id,
+                Username=email,
+                UserAttributes=[
+                    {"Name": "profile", "Value": profile_value}
+                ]
+            )
+            logger.info(f"Set missing 'profile' attribute to '{profile_value}' for {email}")
+
         logger.info(f"Successfully resent invite to {email}")
 
         return build_response(200, {

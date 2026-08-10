@@ -10,7 +10,8 @@
         "cognito-idp:ListUsers",
         "cognito-idp:AdminGetUser",
         "cognito-idp:AdminListGroupsForUser",
-        "cognito-idp:AdminDeleteUser"
+        "cognito-idp:AdminDeleteUser",
+        "cognito-idp:AdminUpdateUserAttributes"
       ],
       "Resource": "arn:aws:cognito-idp:ap-south-1:117984641938:userpool/*"
     }
